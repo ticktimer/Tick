@@ -964,7 +964,7 @@ const FOLD_HIT = "before:absolute before:inset-x-0 before:top-1/2 before:h-11 be
               :aria-label="b.title ? `${b.name} · ${d.wd} ${d.num}${b.title.slice(b.name.length)} · ${b.sub}` : undefined"
               class="absolute flex flex-col gap-px overflow-hidden rounded-sm py-1 pl-1.5 pr-7 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
               :class="[
-                b.dragging ? 'z-10 cursor-grabbing opacity-90 shadow-md' : 'cursor-grab',
+                b.dragging ? `z-10 opacity-90 shadow-md ${drag?.kind === 'move' ? 'cursor-grabbing' : 'cursor-ns-resize'}` : 'cursor-grab',
                 isCoarse && armedId === b.id && !b.dragging ? 'ring ring-primary/60' : ''
               ]"
               :style="{
@@ -978,10 +978,15 @@ const FOLD_HIT = "before:absolute before:inset-x-0 before:top-1/2 before:h-11 be
               @pointerdown="onBlockDown(b.entry, di, $event)"
               @click="openEntry(b.entry)"
             >
-              <span class="pointer-events-none absolute inset-x-0 top-0 h-[6px] cursor-ns-resize" />
+              <!-- Resize zones. They receive the pointer (no pointer-events-none):
+                   a cursor only shows on the element under it, and with these
+                   inert the grab hand won everywhere — the ns-resize arrows were
+                   dead CSS. The press still reaches onBlockDown by bubbling,
+                   which measures against currentTarget (the block), not target. -->
+              <span class="absolute inset-x-0 top-0 h-[6px] cursor-ns-resize" />
               <span class="truncate text-[11px] font-medium leading-[1.25] text-highlighted">{{ b.name }}</span>
               <span class="tnum truncate text-[10px] text-toned">{{ b.sub }}</span>
-              <span class="pointer-events-none absolute inset-x-0 bottom-0 h-[6px] cursor-ns-resize" />
+              <span class="absolute inset-x-0 bottom-0 h-[6px] cursor-ns-resize" />
             </button>
 
             <!-- Start again — the only way a block starts the timer. A sibling
@@ -1064,7 +1069,7 @@ const FOLD_HIT = "before:absolute before:inset-x-0 before:top-1/2 before:h-11 be
               :data-fold="f.id"
               :title="foldTitle(f)"
               :aria-label="foldLabel(f, d)"
-              class="tick-rise absolute flex flex-col gap-0 rounded-sm py-1 pl-1.5 pr-1.5 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
+              class="tick-rise absolute flex cursor-pointer flex-col gap-0 rounded-sm py-1 pl-1.5 pr-1.5 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
               :class="isCoarse && f.h < 44 ? FOLD_HIT : ''"
               :style="{
                 top: f.top + 'px',

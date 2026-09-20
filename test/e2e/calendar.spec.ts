@@ -1,7 +1,7 @@
 // /calendar week grid: seeded blocks render, clicking a block edits it (and
 // must NOT start tracking), the block's play button is the only thing that does.
 import { expect, test } from './helpers/test'
-import { stopAllTimers, createEntry, deleteEntriesNamed, listTimers } from './helpers/api'
+import { stopAllTimers, createEntry, deleteEntriesNamed, listEntries, listTimers, todayRange } from './helpers/api'
 import { calendarBlock, calendarFold, foldList, timerInput, timerToggle, waitForLanesMeasured } from './helpers/dom'
 import { SEED, startsWith, uniqueName } from './helpers/fixtures'
 
@@ -257,4 +257,62 @@ test("a fold's row opens that entry's edit dialog without starting anything", as
   await expect(dialog).toBeHidden()
   // Focus returns to the fold — the row it came from no longer exists.
   await expect(fold).toBeFocused()
+})
+
+// ── Cursor affordances on desktop ───────────────────────────────────────────
+test('a block shows the resize arrows on its edges and the grab hand on its body', async ({ page }) => {
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+  const target = block(page, BLOCK)
+  await expect(target).toBeVisible()
+  const box = (await target.boundingBox())!
+
+  /** The cursor the browser would show at a point: from the element under it. */
+  const cursorAt = async (x: number, y: number) => {
+    await page.mouse.move(x, y)
+    return page.evaluate(([px, py]) => {
+      const el = document.elementFromPoint(px, py)
+      return el ? getComputedStyle(el).cursor : null
+    }, [x, y])
+  }
+  const x = box.x + 12
+
+  // The 6px zones at either edge used to be pointer-events-none, so the
+  // pointer never landed on them and the grab hand showed everywhere.
+  expect(await cursorAt(x, box.y + 2)).toBe('ns-resize')
+  expect(await cursorAt(x, box.y + box.height - 2)).toBe('ns-resize')
+  expect(await cursorAt(x, box.y + box.height / 2)).toBe('grab')
+})
+
+test('dragging the top edge resizes the entry — the press lands on the edge zone', async ({ page, api }) => {
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+  const target = block(page, BLOCK)
+  await expect(target).toBeVisible()
+  const box = (await target.boundingBox())!
+
+  // Press inside the 6px top zone (now a real pointer target), drag one hour
+  // up — HOUR_PX is 48 — and release. onBlockDown reads the press against the
+  // block's own rect, so the zone receiving the pointer must not change what
+  // the press means.
+  const x = box.x + 12
+  await page.mouse.move(x, box.y + 2)
+  await page.mouse.down()
+  await page.mouse.move(x, box.y + 2 - 48, { steps: 8 })
+  await page.mouse.up()
+
+  // The start follows the pointer, snapped to five minutes; the end is
+  // untouched. Exactly 2:05pm, not 2:00pm: a block's top edge sits 1px below
+  // its minute (topOf), the press is 2px further in, and 3px is 3.75 minutes
+  // at 48px an hour — 3:03.75pm at the press, 2:03.75pm an hour up, 2:05pm
+  // after the snap. Pressing on the edge zone changes none of that maths.
+  await expect.poll(async () => {
+    const e = (await listEntries(api, todayRange())).find(e => e.name === BLOCK)
+    if (!e) return null
+    const s = new Date(e.start)
+    const en = new Date(e.end!)
+    return [s.getHours(), s.getMinutes(), en.getHours(), en.getMinutes()]
+  }).toEqual([14, 5, 17, 0])
+  // …and no edit dialog opened on the way: a drag is not a click.
+  await expect(page.getByRole('heading', { name: 'Edit entry' })).toHaveCount(0)
 })
