@@ -365,6 +365,12 @@ export const useTimerStore = defineStore('timer', () => {
     sortTimers()
     composingRaw.value = false
     clearDraft() // consumed — the running timer is now the source of truth
+    // A start made *here* is deliberate: you pressed play, you want to see it.
+    // It becomes the selection, so the bar shows it now and keeps showing it
+    // if a timer started elsewhere (another tab, your phone) arrives through
+    // hydrate() — that one goes to the list. Which is the whole reason the
+    // selection exists: the bar moves when you move it, never on its own.
+    setPinned(created.entryId)
     if (bumped) listOpen.value = true
     syncTicking()
     return created

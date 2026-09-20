@@ -24,6 +24,24 @@ const LIST_ID = 'timer-list-mobile'
 
 const inputEl = ref<HTMLInputElement | null>(null)
 
+// ── Dismiss the list by clicking anywhere else ─────────────────────────────
+// A transient panel should go away on a tap outside it, like a menu. The
+// target is the whole region (bar + list), so the chip, the rows and the
+// other controls never count as "outside". Teleported layers are ignored by
+// role — the "+" dropdown (menu), the picker (dialog) and its combobox list
+// (listbox) all render into <body>, and a pick made from the bar with the
+// list open must not close it under you. Ignoring only the dialog missed the
+// menu item that opens it. The other bar is mounted too, CSS-hidden — every
+// click is "outside" a display:none element, so an instance only acts while
+// it actually has a box on screen.
+const rootEl = ref<HTMLElement | null>(null)
+
+onClickOutside(rootEl, () => {
+  if (!timer.listOpen) return
+  if (!rootEl.value || rootEl.value.getClientRects().length === 0) return
+  timer.closeList()
+}, { ignore: ['[role="dialog"]', '[role="alertdialog"]', '[role="menu"]', '[role="listbox"]'] })
+
 // ── Description input (debounced while running, same as TimerBar) ──────────
 const nameLocal = ref(timer.currentName)
 
@@ -190,6 +208,7 @@ async function toggle() {
 
 <template>
   <div
+    ref="rootEl"
     role="region"
     aria-label="Timer"
     class="relative mx-3 flex flex-col gap-2 rounded-xl border border-accented bg-default py-2.5 dark:bg-elevated pr-2.5 pl-3.5 has-[input:focus-visible]:border-primary has-[input:focus-visible]:ring-1 has-[input:focus-visible]:ring-primary"

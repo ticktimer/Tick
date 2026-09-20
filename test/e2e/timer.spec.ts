@@ -287,34 +287,78 @@ test('▶ on an entry while a timer runs adds a second one and opens the list', 
   await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([NAME, again])
 })
 
-test('tapping a row selects it: the selection stays in the bar when a newer one starts', async ({ page, api }) => {
+test('clicking anywhere outside the running list closes it', async ({ page }) => {
   await page.goto('/time')
 
   await timerInput(page).fill(NAME)
   await timerToggle(page).click()
   await expect(timerToggle(page)).toHaveAccessibleName('Stop')
 
-  // Select it (it is already the newest, so this is what makes it *stick*),
-  // then start a second one.
+  await timerCount(page).click()
+  await expect(timerList(page)).toBeVisible()
+
+  // Inside the region — a row, the chip's neighbours — is not outside: the
+  // list stays. (The chip itself toggles, which is its own behaviour.)
+  await timerListRow(page, NAME).click()
+  await expect(timerList(page)).toBeVisible()
+
+  // The page below is.
+  await page.getByRole('heading', { name: 'Time', exact: true }).click()
+  await expect(timerList(page)).toBeHidden()
+  await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'false')
+
+  // A pick made with the list open does not close it under you: the picker
+  // is a dialog, and dialogs are ignored.
+  await timerCount(page).click()
+  await expect(timerList(page)).toBeVisible()
+  await timerPlus(page).click()
+  await page.getByRole('menuitem', { name: 'Project' }).click()
+  await expect(picker(page)).toBeVisible()
+  await picker(page).getByRole('combobox').fill(SEED.projectNoRate.name)
+  await picker(page).getByRole('option', { name: startsWith(SEED.projectNoRate.name) }).click()
+  await expect(picker(page)).toBeHidden()
+  await expect(timerList(page)).toBeVisible()
+})
+
+test('a timer you start takes the bar; one started elsewhere leaves your selection alone', async ({ page, api }) => {
+  const elsewhere = name('E2E timer elsewhere')
+  await page.goto('/time')
+
+  await timerInput(page).fill(NAME)
+  await timerToggle(page).click()
+  await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+
   await timerCount(page).click()
   await timerListSelect(page, NAME).click()
   await expect(timerListRow(page, NAME)).toHaveAttribute('aria-current', 'true')
 
+  // ── A start made here is deliberate: it takes the bar and the selection ──
   await addTimerButton(page).click()
   await timerInput(page).fill(SECOND)
   await timerToggle(page).click()
   await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([NAME, SECOND])
 
-  // The selection wins over "newest": the bar still shows the first timer,
-  // and the list marks it as the selected row.
-  await expect(timerInput(page)).toHaveValue(NAME)
-  await expect(timerListRow(page, NAME)).toHaveAttribute('aria-current', 'true')
-  await expect(timerListRow(page, SECOND)).not.toHaveAttribute('aria-current', 'true')
-
-  // Tapping the other row hands the bar to it.
-  await timerListSelect(page, SECOND).click()
   await expect(timerInput(page)).toHaveValue(SECOND)
   await expect(timerListRow(page, SECOND)).toHaveAttribute('aria-current', 'true')
+  await expect(timerListRow(page, NAME)).not.toHaveAttribute('aria-current', 'true')
+
+  // Tapping a row hands the bar to it.
+  await timerListSelect(page, NAME).click()
+  await expect(timerInput(page)).toHaveValue(NAME)
+  await expect(timerListRow(page, NAME)).toHaveAttribute('aria-current', 'true')
+
+  // ── A start made ELSEWHERE (another tab, a phone) arrives through the
+  //    refocus re-hydrate. It goes to the list; the bar stays where you put it.
+  const reloads = countListReloads(page, s => s === 200)
+  const res = await api.post('/api/timers', { data: { name: elsewhere } })
+  expect(res.ok(), `POST /api/timers → ${res.status()}`).toBe(true)
+  await hydrateOnRefocus(page, () => reloads() > 0)
+
+  await expect(timerCount(page)).toHaveText(/3\s*running/)
+  await expect(timerListRow(page, elsewhere)).toBeVisible()
+  await expect(timerInput(page)).toHaveValue(NAME)
+  await expect(timerListRow(page, NAME)).toHaveAttribute('aria-current', 'true')
+  await expect(timerListRow(page, elsewhere)).not.toHaveAttribute('aria-current', 'true')
 })
 
 // ── Regressions found reviewing #37 ─────────────────────────────────────────

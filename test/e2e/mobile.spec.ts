@@ -118,6 +118,11 @@ test.describe('mobile shell', { tag: '@mobile' }, () => {
       const b = await timerList(page).boundingBox()
       return b ? Math.round(b.y + b.height) <= Math.round(opened!.y) : null
     }).toBe(true)
+
+    // A tap on the page behind it dismisses it, like any transient sheet.
+    await page.getByRole('heading', { name: 'Time', exact: true }).tap()
+    await expect(timerList(page)).toBeHidden()
+    await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'false')
   })
 
   test('"Add a timer" starts a second one from the dock', async ({ page }) => {
