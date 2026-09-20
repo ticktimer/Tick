@@ -9,8 +9,8 @@
 import AxeBuilder from '@axe-core/playwright'
 import type { AxeResults } from 'axe-core'
 import type { Page } from '@playwright/test'
-import { createTask, deleteTasksNamed, stopAllTimers } from './helpers/api'
-import { addTimerButton, picker, timerCount, timerInput, timerList, timerPlus, timerToggle } from './helpers/dom'
+import { createEntry, createTask, deleteEntriesNamed, deleteTasksNamed, stopAllTimers } from './helpers/api'
+import { addTimerButton, calendarFold, foldList, picker, timerCount, timerInput, timerList, timerPlus, timerToggle, waitForLanesMeasured } from './helpers/dom'
 import { uniqueName } from './helpers/fixtures'
 import { expect, test } from './helpers/test'
 
@@ -41,6 +41,13 @@ function formatViolations(violations: AxeResults['violations']): string {
 async function checkA11y(page: Page, label: string) {
   const { violations } = await new AxeBuilder({ page }).withTags(TAGS).analyze()
   expect(violations, violations.length ? `axe violations on ${label}:\n\n${formatViolations(violations)}` : '').toEqual([])
+}
+
+/** A one-hour entry starting at h:m today — early morning, clear of every seeded row. */
+function entryAt(h: number, m: number) {
+  const start = new Date()
+  start.setHours(h, m, 0, 0)
+  return { start: start.toISOString(), end: new Date(start.getTime() + 60 * 60_000).toISOString() }
 }
 
 /** Settings → Appearance preset buttons apply AND persist immediately (cookie
@@ -120,6 +127,30 @@ for (const preset of ['Nocturne', 'Daylight'] as const) {
       } finally {
         // stopAllTimers also deletes the entries the two timers produced.
         await stopAllTimers(api)
+      }
+    })
+
+    // ticktimer/Tick#37 — in Week view any two overlapping entries fold into
+    // one block, and its list is a surface of its own (rows on the popover's
+    // bg-default, a ▶ per row). Both presets: every text token on that tint
+    // is mode-dependent.
+    test(`a folded calendar cluster and its list have no violations (${preset})`, async ({ page, api }) => {
+      const a = uniqueName('E2E a11y fold A')
+      const b = uniqueName('E2E a11y fold B')
+      await applyPreset(page, preset)
+      try {
+        await createEntry(api, { name: a, billable: true, ...entryAt(3, 0) })
+        await createEntry(api, { name: b, billable: true, ...entryAt(3, 30) })
+        await page.goto('/calendar')
+        await waitForLanesMeasured(page)
+        const fold = calendarFold(page, a, b)
+        await expect(fold).toBeVisible()
+        await checkA11y(page, `calendar fold face (${preset})`)
+        await fold.click()
+        await expect(foldList(page)).toBeVisible()
+        await checkA11y(page, `calendar fold list (${preset})`)
+      } finally {
+        await deleteEntriesNamed(api, a, b)
       }
     })
   })
@@ -260,6 +291,30 @@ test.describe('mobile subset', { tag: '@mobile' }, () => {
   // The running list floats above the dock as an overlay with its own header
   // and ✕ — a surface the desktop sweep never renders. Scanned with the dock
   // in its running state too, since that is the only time the list exists.
+  for (const preset of ['Nocturne', 'Daylight'] as const) {
+    test(`calendar fold and its list have no violations (${preset})`, async ({ page, api }) => {
+      // Four in one hour: a 294px column keeps three ~94px lanes but not four.
+      const names = [0, 20, 40, 50].map(m => uniqueName(`E2E a11y mobile fold ${m}`))
+      await applyPreset(page, preset)
+      try {
+        for (const [i, n] of names.entries()) {
+          await createEntry(api, { name: n, billable: true, ...entryAt(4, [0, 20, 40, 50][i]!) })
+        }
+        await page.goto('/calendar')
+        await waitForLanesMeasured(page)
+        const fold = calendarFold(page, ...names)
+        await expect(fold).toBeVisible()
+        await checkA11y(page, `calendar fold face (mobile, ${preset})`)
+        await fold.click()
+        await expect(foldList(page)).toBeVisible()
+        await checkA11y(page, `calendar fold list (mobile, ${preset})`)
+      } finally {
+        await deleteEntriesNamed(api, ...names)
+        if (preset !== 'Nocturne') await applyPreset(page, 'Nocturne')
+      }
+    })
+  }
+
   test('running-list overlay has no violations', async ({ page, api }) => {
     const first = uniqueName('E2E a11y mobile timer')
     await page.goto('/time')

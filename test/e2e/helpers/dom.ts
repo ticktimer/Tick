@@ -116,3 +116,37 @@ export function entryRow(scope: Page | Locator, name: string): Locator {
   const page = 'page' in scope ? scope.page() : scope
   return rows(scope).filter({ has: page.getByRole('button', { name, exact: true }) })
 }
+
+// ── Calendar ───────────────────────────────────────────────────────────────
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * A drawn calendar entry block, by the name its accessible name leads with —
+ * "<name> · Sat 12 · 3:00pm – 5:00pm · 2h 00m · <chain>". Anchored on the
+ * " · " after the name, so a fold whose label begins with the same name and a
+ * comma ("<name>, <other> · 2 entries …") never matches.
+ */
+export function calendarBlock(page: Page, name: string): Locator {
+  return page.getByRole('button', { name: new RegExp(`^${esc(name)} · `) })
+}
+
+/** A folded cluster (ticktimer/Tick#37), by its members in start order. */
+export function calendarFold(page: Page, ...names: string[]): Locator {
+  return page.getByRole('button', {
+    name: new RegExp(`^${names.map(esc).join(', ')} · ${names.length} entries`)
+  })
+}
+
+/** The list a fold discloses: one row per member, a ▶ on every ended one. */
+export function foldList(page: Page): Locator {
+  return page.getByRole('list', { name: 'Overlapping entries' })
+}
+
+/**
+ * Lane widths — and so whether a cluster is drawn as lanes or a fold — come
+ * from the measured grid; the server render assumes Week's widest column. Any
+ * assertion about block geometry waits for the measurement to have landed.
+ */
+export async function waitForLanesMeasured(page: Page): Promise<void> {
+  await page.locator('[data-lanes-measured]').waitFor()
+}

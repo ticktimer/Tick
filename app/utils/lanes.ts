@@ -8,6 +8,11 @@
 // cluster is as wide as its busiest moment (`lanes`), and every item in it
 // takes one `lane`. Two clusters that never touch each other both get the full
 // width. Input order is preserved in the result.
+//
+// Clusters are also numbered (`cluster`, 0-based in start order) so a caller
+// can treat one as a unit: clusterSpans() folds each into its envelope. That is
+// how the calendar draws a whole overlapping group as one block once its lanes
+// would be too narrow to carry a name — the fold (ticktimer/Tick#37).
 
 export interface Span {
   top: number
@@ -19,6 +24,20 @@ export interface Lane {
   lane: number
   /** How many columns the cluster needs; 1 means the block has the width to itself. */
   lanes: number
+  /** Which cluster the block belongs to — 0-based, numbered in start order. */
+  cluster: number
+}
+
+/** One cluster as a unit: its envelope, and which input items it holds. */
+export interface ClusterSpan {
+  cluster: number
+  lanes: number
+  /** Top of the member that starts first. */
+  top: number
+  /** Down to the bottom of the member that ends last. */
+  h: number
+  /** Indices into the input, sorted by top, then input order. */
+  members: number[]
 }
 
 export function assignLanes(items: readonly Span[]): Lane[] {
@@ -27,13 +46,19 @@ export function assignLanes(items: readonly Span[]): Lane[] {
     // Earlier first; among equals the taller first, so the long one keeps lane 0.
     .sort((a, b) => a.top - b.top || b.bottom - a.bottom)
 
-  const out: Lane[] = items.map(() => ({ lane: 0, lanes: 1 }))
+  const out: Lane[] = items.map(() => ({ lane: 0, lanes: 1, cluster: 0 }))
   let cluster: number[] = []
   let laneEnds: number[] = []
   let clusterEnd = -Infinity
+  let clusters = 0
 
   const close = () => {
-    for (const i of cluster) out[i]!.lanes = laneEnds.length
+    if (!cluster.length) return // before the first item (or with none at all): nothing to number
+    for (const i of cluster) {
+      out[i]!.lanes = laneEnds.length
+      out[i]!.cluster = clusters
+    }
+    clusters++
     cluster = []
     laneEnds = []
   }
@@ -49,5 +74,34 @@ export function assignLanes(items: readonly Span[]): Lane[] {
     clusterEnd = Math.max(clusterEnd, s.bottom)
   }
   close()
+  return out
+}
+
+/**
+ * Every cluster folded to one span — the union envelope of its members, and
+ * the members themselves as indices into `items`. `lanes` is what
+ * assignLanes(items) returned for the same items. Spans come back in cluster
+ * order (= start order), members by top then input order: the same answer for
+ * any input order.
+ */
+export function clusterSpans(items: readonly Span[], lanes: readonly Lane[]): ClusterSpan[] {
+  if (lanes.length !== items.length) {
+    throw new RangeError(`clusterSpans: ${lanes.length} lanes for ${items.length} items`)
+  }
+  const byCluster = new Map<number, ClusterSpan>()
+  items.forEach((s, i) => {
+    const { cluster, lanes: width } = lanes[i]!
+    const span = byCluster.get(cluster)
+    if (!span) {
+      byCluster.set(cluster, { cluster, lanes: width, top: s.top, h: s.h, members: [i] })
+      return
+    }
+    const bottom = Math.max(span.top + span.h, s.top + s.h)
+    span.top = Math.min(span.top, s.top)
+    span.h = bottom - span.top
+    span.members.push(i)
+  })
+  const out = [...byCluster.values()].sort((a, b) => a.cluster - b.cluster)
+  for (const span of out) span.members.sort((a, b) => items[a]!.top - items[b]!.top || a - b)
   return out
 }

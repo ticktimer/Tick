@@ -4,6 +4,8 @@ import { expect, test } from './helpers/test'
 import { stopAllTimers, createEntry, deleteEntriesNamed, listEntries } from './helpers/api'
 import {
   addTimerButton,
+  calendarBlock,
+  calendarFold,
   closeTimerListButton,
   bulkActionsBar,
   entryRow,
@@ -15,9 +17,10 @@ import {
   timerList,
   timerListRow,
   timerPlus,
-  timerToggle
+  timerToggle,
+  waitForLanesMeasured
 } from './helpers/dom'
-import { uniqueName } from './helpers/fixtures'
+import { SEED, uniqueName } from './helpers/fixtures'
 
 const VIEWPORT = { width: 390, height: 844 }
 const TIMER_NAME = uniqueName('E2E mobile timer')
@@ -511,4 +514,38 @@ test.describe('mobile shell', { tag: '@mobile' }, () => {
     expect(deleteBox!.x).toBeGreaterThanOrEqual(0)
     expect(deleteBox!.x + deleteBox!.width).toBeLessThanOrEqual(VIEWPORT.width)
   })
+  // ── ticktimer/Tick#37: lanes and folds on a 294px day column ─────────────
+  test('calendar: three overlapping entries keep lanes on a phone; a fourth folds them', async ({ page, api }) => {
+    /** A one-hour entry starting at h:m today — before the seed's 9:05 row. */
+    const at = (h: number, m: number) => {
+      const start = new Date()
+      start.setHours(h, m, 0, 0)
+      return { start: start.toISOString(), end: new Date(start.getTime() + 60 * 60_000).toISOString() }
+    }
+    const names = [name('E2E mobile lane A'), name('E2E mobile lane B'), name('E2E mobile lane C')]
+    for (const [i, n] of names.entries()) await createEntry(api, { name: n, billable: true, ...at(5, i * 20) })
+
+    await page.goto('/calendar')
+    // A phone opens in Day view: one ~294px column.
+    await expect(page.getByRole('button', { name: 'Day', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await waitForLanesMeasured(page)
+
+    // Three lanes are ~94px — enough for a name beside a ▶ — so they stay side
+    // by side, disjoint, each well under a lone block's width.
+    const lone = (await calendarBlock(page, SEED.todayEntries[0]!).boundingBox())!
+    const boxes = await Promise.all(names.map(n => calendarBlock(page, n).boundingBox()))
+    for (const b of boxes) expect(b!.width).toBeLessThan(lone.width * 0.4)
+    const spans = boxes.map(b => [b!.x, b!.x + b!.width] as const).sort((a, b) => a[0] - b[0])
+    for (let i = 1; i < spans.length; i++) expect(spans[i]![0]).toBeGreaterThanOrEqual(spans[i - 1]![1] - 1)
+
+    // A fourth in the same hour would need ~70px lanes — under the floor — so
+    // the whole cluster is drawn as one block naming all four, in start order.
+    const fourth = name('E2E mobile lane D')
+    await createEntry(api, { name: fourth, billable: true, ...at(5, 50) })
+    await page.goto('/calendar')
+    await waitForLanesMeasured(page)
+    await expect(calendarFold(page, ...names, fourth)).toBeVisible()
+    for (const n of [...names, fourth]) await expect(calendarBlock(page, n)).toHaveCount(0)
+  })
+
 })

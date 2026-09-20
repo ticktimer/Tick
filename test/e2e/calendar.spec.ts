@@ -2,7 +2,7 @@
 // must NOT start tracking), the block's play button is the only thing that does.
 import { expect, test } from './helpers/test'
 import { stopAllTimers, createEntry, deleteEntriesNamed, listTimers } from './helpers/api'
-import { timerInput, timerToggle } from './helpers/dom'
+import { calendarBlock, calendarFold, foldList, timerInput, timerToggle, waitForLanesMeasured } from './helpers/dom'
 import { SEED, startsWith, uniqueName } from './helpers/fixtures'
 
 /** Our own block: 3–5pm today, clear of the seeded 9:05/11:30/13:00 blocks. */
@@ -23,6 +23,20 @@ function todaySlot(fromHour: number, toHour: number) {
 /** A calendar block, addressed by the entry name it opens with. */
 function block(page: import('@playwright/test').Page, name: string) {
   return page.getByRole('button', { name: startsWith(name) }).first()
+}
+
+/**
+ * Day view: one column, ~1100px wide at 1440, so up to ten overlapping blocks
+ * keep real lanes with a ▶ each. The play-button tests run here on purpose:
+ * in Week view a timer started between ~14:30 and 17:00 would overlap BLOCK
+ * (3–5pm) and fold its ▶ away (ticktimer/Tick#37), so they would pass or fail
+ * by the hour of the run.
+ */
+async function openDayView(page: import('@playwright/test').Page) {
+  const day = page.getByRole('button', { name: 'Day', exact: true })
+  await day.click()
+  await expect(day).toHaveAttribute('aria-pressed', 'true')
+  await waitForLanesMeasured(page)
 }
 
 test.beforeEach(async ({ api }) => {
@@ -77,6 +91,7 @@ test('clicking a block opens the edit dialog without starting the timer', async 
 
 test('the block play button starts the timer for that entry', async ({ page, api }) => {
   await page.goto('/calendar')
+  await openDayView(page)
   await expect(block(page, BLOCK)).toBeVisible()
 
   await page.getByRole('button', { name: `Start timer for ${BLOCK}` }).click()
@@ -93,6 +108,7 @@ test('the block play button starts the timer for that entry', async ({ page, api
 
 test('the block play button starts a SECOND timer instead of replacing the first', async ({ page, api }) => {
   await page.goto('/calendar')
+  await openDayView(page)
   await expect(block(page, BLOCK)).toBeVisible()
 
   // Something is already running before the block is played.
@@ -147,13 +163,15 @@ test.describe('browser timezone differs from the server', () => {
 })
 
 // ── ticktimer/Tick#37 ───────────────────────────────────────────────────────
-test('entries that overlap in time share the column side by side', async ({ page, api }) => {
+test('in Day view, entries that overlap in time share the column side by side', async ({ page, api }) => {
   // Fixed slots, not "now": a running block's lane is the same code path
   // (app/utils/lanes, one layout per day over ended + running blocks) and is
   // pinned by the unit suite; involving the live clock here would make this
-  // pass or fail by the hour of the run.
+  // pass or fail by the hour of the run. Day view, because lanes only exist
+  // where one can carry a name — Week's columns never can (see the fold tests).
   await createEntry(api, { name: OVERLAP, billable: true, ...todaySlot(16, 18) })
   await page.goto('/calendar')
+  await openDayView(page)
 
   const a = block(page, BLOCK)
   const b = block(page, OVERLAP)
@@ -183,4 +201,60 @@ test('entries that overlap in time share the column side by side', async ({ page
   await play.click()
   running.push(OVERLAP)
   await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([OVERLAP])
+})
+
+test('in Week view, overlapping entries fold into one block whose list has a ▶ per entry', async ({ page, api }) => {
+  await createEntry(api, { name: OVERLAP, billable: true, ...todaySlot(16, 18) })
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+
+  // A week column is at most ~158px, so two lanes would be ~74px — under the
+  // 80px a name needs beside its ▶. The pair is drawn as ONE block naming both,
+  // and the member blocks are not in the column at all.
+  const fold = calendarFold(page, BLOCK, OVERLAP)
+  await expect(fold).toBeVisible()
+  await expect(fold).toContainText(BLOCK)
+  await expect(fold).toContainText(OVERLAP)
+  await expect(fold).toHaveAttribute('title', `${BLOCK} · 3:00pm – 5:00pm\n${OVERLAP} · 4:00pm – 6:00pm`)
+  await expect(calendarBlock(page, BLOCK)).toHaveCount(0)
+  await expect(calendarBlock(page, OVERLAP)).toHaveCount(0)
+  // Nothing on the face starts a timer: no ▶ exists until the list is open.
+  await expect(page.getByRole('button', { name: `Start timer for ${OVERLAP}` })).toHaveCount(0)
+
+  // The list: an edit row per entry, each with its own ▶ beside a name you
+  // can actually read — which is where "which one am I restarting" lives.
+  await fold.click()
+  const list = foldList(page)
+  await expect(list).toBeVisible()
+  await expect(list.getByRole('button', { name: `Edit ${BLOCK}, 3:00pm – 5:00pm`, exact: true })).toBeVisible()
+  const play = list.getByRole('button', { name: `Start timer for ${OVERLAP}`, exact: true })
+  await expect(play).toBeVisible()
+  await play.click()
+  running.push(OVERLAP)
+  await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([OVERLAP])
+  // One disclosure at a time: the store opens the bar's running list on a
+  // start while something runs, so the fold's list closes.
+  await expect(list).toBeHidden()
+})
+
+test("a fold's row opens that entry's edit dialog without starting anything", async ({ page, api }) => {
+  await createEntry(api, { name: OVERLAP, billable: true, ...todaySlot(16, 18) })
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+
+  const fold = calendarFold(page, BLOCK, OVERLAP)
+  await fold.click()
+  await foldList(page).getByRole('button', { name: `Edit ${BLOCK}, 3:00pm – 5:00pm`, exact: true }).click()
+
+  const dialog = page.getByRole('dialog').filter({
+    has: page.getByRole('heading', { name: 'Edit entry' })
+  })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByLabel('What did you work on?')).toHaveValue(BLOCK)
+  expect(await listTimers(api)).toEqual([])
+
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toBeHidden()
+  // Focus returns to the fold — the row it came from no longer exists.
+  await expect(fold).toBeFocused()
 })
