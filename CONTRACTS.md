@@ -13,7 +13,7 @@ Shared DTO types: `shared/types/index.ts` (auto-imported in app + server). Do no
 - Passwords: `server/utils/password.ts` (owned by schema agent) exports `hashPassword(pw)` / `verifyPassword(pw, stored)` using node:crypto scrypt, format `salt:hex`. Auth + seed both use it — not nuxt-auth-utils' built-ins.
 - Nuxt UI components everywhere they fit; all colors via semantic tokens (`primary`, `neutral`, `--ui-*`). Never hard-code Nocturne hex values.
 - Entries store only the deepest ref (Rule 1). Rates resolve server-side (Rule 2). Everything soft-deletes (`deleted_at`), 30-day trash (Rules 3–4).
-- Timer = `time_entries` row with `end IS NULL`, max one per user.
+- Timer = `time_entries` row with `end IS NULL`. Several may run per user, capped at `MAX_RUNNING_TIMERS` (`shared/utils/timers.ts`) — ticktimer/Tick#37.
 - Tabular numerals (`.tnum`) on every time/money figure. Headings weight 500 max. Primary buttons outlined, accent never a large fill.
 - Each agent creates/edits ONLY files it owns (listed in its prompt). Read anything.
 
@@ -25,10 +25,12 @@ Auth (nuxt-auth-utils):
 - Session payload = `SessionUser` (shared types). Server helper `requireAuth(event)` → SessionUser (throws 401).
 
 Timer:
-- `GET /api/timer` → TimerState|null
-- `POST /api/timer/start` {name?,refType?,refId?,billable?} → TimerState (stops nothing; 409 if already running)
-- `PATCH /api/timer` {name?,refType?,refId?|null,billable?} → TimerState
-- `POST /api/timer/stop` → EntryDto|null (null = <1s discard)
+- `GET /api/timers` → TimerState[] (every running timer for the user, `start ASC, id ASC`; `[]` when none)
+- `POST /api/timers` {name?,refType?,refId?,billable?} → TimerState (stops nothing; 409 at the cap)
+- `PATCH /api/timers/:id` {name?,refType?,refId?|null,billable?} → TimerState
+- `POST /api/timers/:id/stop` → EntryDto|null (null = <1s discard)
+- 404 `No timer running.` for an id that is unknown, ended, trashed or another user's — the
+  message never reveals which.
 
 Entries:
 - `GET /api/entries?from=ISO&to=ISO` → EntryDto[] (desc by start; excludes running + trashed)
@@ -47,15 +49,15 @@ Dashboard: `GET /api/summary/dashboard` → DashboardSummary
 
 ## Pinia stores (app/stores/*.ts)
 
-- `useTimerStore` — state {timer: TimerState|null, elapsedSec}; getters running; actions hydrate(), start(), stop() (returns EntryDto|null), update(patch), attach(refType,refId), detach(), toggleBillable(). Ticks elapsedSec every 1s while running; persists nothing itself (server is truth; hydrate on app mount).
+- `useTimerStore` — state {timers: TimerState[] (server order: start ASC, id ASC), pinnedId (localStorage `tick-timer-pinned`, hydrated after mount), nowMs, draftName/draftRef/draftBillable (localStorage `tick-timer-draft`)}; getters running, count, atCap, composing, activeTimer (pinned while it still runs, else newest), elapsedFor(id), activeElapsedSec, totalElapsedSec, currentRef/currentName/billable/resolvedRate (the active timer, or the draft while composing); actions hydrate(), hydrateIfStale(), hydrateDraft(), hydratePinned(), start(payload?), stop(id?) (returns EntryDto|null), update(patch,id?), setName(name,id?), attach(refType,refId,id?), detach(id?), toggleBillable(id?), pin(id)/unpin(), compose()/cancelCompose(). Every `id?` defaults to the active timer. **One** interval for the whole app ticks nowMs while anything runs; per-timer elapsed is derived, never stored. Server is truth (hydrate on app mount); only the pin and the draft are local. Module exports isTimerCapError(err)/timerCapMessage(err) for the 409.
 - `useEntriesStore` — state {entries, selection:Set, filter, groupBy:'day'|'project', undoStack}; actions fetchRange(from,to), addManual(payload), remove(id), bulkDelete(), bulkBillable(bool), restore(deleted), applyStoppedEntry(dto). Filter parses `#tag` `@name` free text.
 - `useCatalogStore` — {clients, projects, tasks, tags} + fetchAll() + create/update/remove per entity (calls API, refreshes).
 - `useThemeStore` — {preset, primary, neutral, radius, font, mode, starfield}; action apply() → updateAppConfig ui.colors + sets `--ui-radius`/`--font-sans` on :root + colorMode; persist localStorage `tick-theme` + PATCH /api/me/theme (jsonb).
-- `useUiStore` — {pickerOpen, pickerTarget:'timer'|'manual', manualOpen, cascade:{open, kind, id}}.
+- `useUiStore` — {pickerOpen, pickerTarget:'timer'|'manual'|'bulk', pickerTimerId (which running timer the pick attaches to; null = the draft), manualOpen, cascade:{open, kind, id}}.
 
 ## Shared components (owner in parens)
 
-- `AppSidebar`, `TimerBar`, layout `default.vue` (shell agent). TimerBar consumes useTimerStore + opens picker via useUiStore.
+- `AppSidebar`, `TimerBar`, `MobileTimerCard`, `TimerList`, layout `default.vue` (shell agent). TimerBar/MobileTimerCard consume useTimerStore + open the picker via useUiStore; both show the *active* timer plus a count chip that discloses `TimerList` (every running timer: live clock, pin, stop) and an "Add a timer" toggle that swaps the bar to the draft composer.
 - `PickerModal` (time agent) — props none; reads useUiStore.pickerTarget; emits nothing; on pick calls timer.attach() or fills manual dialog via useUiStore state {pickerResult}. Tabs Client/Project/Task, search, create-inline, keyboard nav (see README §Picker modal).
 - `ManualEntryDialog` (time agent) — free-text date/time/duration parsers in `app/utils/parse.ts` (exported: parseDate, parseTime, parseDuration, formatDuration, formatMoney).
 - `CascadeDeleteDialog` (manage agent) — reads useUiStore.cascade; downward-cascading checkboxes + outcome panel per README Rule 3.

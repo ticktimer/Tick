@@ -1,7 +1,7 @@
 // /time: manual entry with a free-text date, inline edit, delete + undo toast,
 // and a bulk "Move to…" reassign.
 import { expect, test } from './helpers/test'
-import { createEntry, clearRunningTimer, deleteEntriesNamed } from './helpers/api'
+import { createEntry, stopAllTimers, deleteEntriesNamed } from './helpers/api'
 import { bulkActionsBar, entryRow, group, picker } from './helpers/dom'
 import { SEED, startsWith, uniqueName } from './helpers/fixtures'
 
@@ -22,7 +22,7 @@ function slot(daysAgo: number, hour: number, minutes = 30) {
 }
 
 test.beforeEach(async ({ api }) => {
-  await clearRunningTimer(api)
+  await stopAllTimers(api)
 })
 
 test.afterEach(async ({ api }) => {

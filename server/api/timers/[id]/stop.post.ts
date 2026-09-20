@@ -1,19 +1,28 @@
-// POST /api/timer/stop — end the running entry. <1s elapsed = accidental tap:
-// the row is discarded (hard delete) and null returned.
+// POST /api/timers/:id/stop — end ONE running entry; the caller's other timers
+// keep running. <1s elapsed = accidental tap: the row is discarded (hard
+// delete) and null returned.
 //
 // The host wall clock (notably under WSL) can step backwards — and Postgres'
 // now() follows the same clock, so no wall clock (JS Date OR DB) can be
 // trusted for elapsed time. Primary source of truth: the monotonic mark
-// start.post.ts left in monoStarts (performance.now() never steps). When the
+// index.post.ts left in monoStarts (performance.now() never steps). When the
 // mark is gone (server restarted mid-run) we fall back to DB-clock SQL, and
 // in both paths the persisted end is computed IN SQL with a GREATEST floor —
 // a negative/backwards duration can never persist.
+//
+// The marks are keyed by entry id, so N concurrent timers need nothing extra:
+// each stop reads and clears its own.
+//
+// 404 'No timer running.' when the id is unknown, already ended, trashed, or
+// belongs to another user/org — generic so it cannot reveal that an id exists
+// in another org (test/integration/org-scoping.test.ts asserts it).
 const monoStarts: Map<string, number> =
   ((globalThis as Record<string, unknown> & { __tickTimerMonoStarts?: Map<string, number> })
     .__tickTimerMonoStarts ??= new Map())
 
 export default defineEventHandler(async (event): Promise<EntryDto | null> => {
   const user = await requireAuth(event)
+  const id = uuidRouterParam(event, 'id')
   const db = useDrizzle()
 
   const [running] = await db
@@ -21,6 +30,7 @@ export default defineEventHandler(async (event): Promise<EntryDto | null> => {
     .from(schema.timeEntries)
     .where(
       and(
+        eq(schema.timeEntries.id, id),
         eq(schema.timeEntries.orgId, user.orgId),
         eq(schema.timeEntries.userId, user.id),
         isNull(schema.timeEntries.end),

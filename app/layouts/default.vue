@@ -21,6 +21,11 @@ function onRefocus() {
 onMounted(() => {
   timer.hydrate()
   timer.hydrateDraft()
+  // Both read localStorage, and both do it *after* mount so the SSR'd shell and
+  // the first client render agree. hydratePinned() runs synchronously here,
+  // i.e. before hydrate()'s fetch resolves, so a saved pin is always in place
+  // before the list it points into arrives.
+  timer.hydratePinned()
   catalog.fetchAll().catch(() => {})
   ui.hydratePrefs()
   window.addEventListener('focus', onRefocus)

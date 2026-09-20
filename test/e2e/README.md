@@ -2,8 +2,9 @@
 
 Playwright drives a **real production build** of Tick against the dedicated
 `tick_test` database. These specs cover the flows that were re-verified by hand
-every swing: sign in / out, the timer, the Time page's entry flows, the calendar
-grid, theme persistence, and the mobile shell.
+every swing: sign in / out, the timer (including several running at once), the
+Time page's entry flows, the calendar grid, theme persistence, and the mobile
+shell.
 
 ```bash
 npm run test:e2e                      # everything (desktop + mobile projects)
@@ -66,15 +67,20 @@ directly on the plain-HTTP login it enables:
 ## Determinism rules the specs follow
 
 * **One worker, files in order** (`fullyParallel: false`, `workers: 1`). Every
-  spec drives the same seeded account and a timer is one-per-user server-side,
-  so parallel files would fight over it.
+  spec drives the same seeded account, and running timers are account-wide
+  state (up to `MAX_RUNNING_TIMERS` of them since ticktimer/Tick#37), so
+  parallel files would show each other's timers and share one cap.
 * **The seed is the fixture.** `global-setup` reseeds `tick_test` before every
   run, so a run never inherits the previous one's state.
 * **Everything a spec creates, it deletes** through the API in `afterEach`
-  (`helpers/api.ts`). Specs that start a timer also stop it there — a leaked
-  running timer would make the next `POST /api/timer/start` 409.
+  (`helpers/api.ts`). Specs that start a timer call `stopAllTimers(api)` there,
+  which stops every running timer and deletes the entries they produced — a
+  leaked running timer would show up in the next spec's running list and eat
+  into its cap.
 * **No wall-clock assumptions.** Ticking clocks are asserted with polled
-  matchers, never `waitForTimeout`. `timer.spec` parks today's three seeded
+  matchers, never `waitForTimeout`. The multi-timer cases read a row's clock,
+  then poll until it differs, rather than matching a literal `00:00:0x` — two
+  timers started seconds apart never show the same digits. `timer.spec` parks today's three seeded
   rows in the trash for the duration of the test and restores them afterwards:
   the seed writes them at fixed clock times (9:05, 11:30, 13:00), so whether a
   timer stopped "now" sorts above them would otherwise depend on the hour of
@@ -98,7 +104,9 @@ Settings) plus the picker and manual-entry dialogs, asserting zero
 `wcag2a`/`wcag2aa`/`wcag21a`/`wcag21aa` violations. Logged-in pages run once
 per shipped color-mode default — **Nocturne** (dark) and **Daylight**
 (light) — switched via the real Settings → Appearance preset buttons (not a
-hand-rolled cookie). Every test that switches to a non-default preset restores
+hand-rolled cookie). The same pair also scans the **running-timer list**
+(ticktimer/Tick#37): it is a surface no page load reaches, so that test starts
+two timers, opens the disclosure, scans, and stops them again in a `finally`. Every test that switches to a non-default preset restores
 Nocturne in its own `afterEach`: the preset persists server-side
 (`users.theme`) for the rest of the run, so leaving it dirty would carry into
 whichever spec runs next. This doesn't need a run-to-run cleanup step —
@@ -146,7 +154,10 @@ Roles, labels and headings first (`helpers/dom.ts`). Two notes:
 
 * The shell renders the desktop timer bar **and** the mobile dock at the same
   time, one of them CSS-hidden — widgets that exist twice are narrowed with
-  `filter({ visible: true })`, never with breakpoint classes.
+  `filter({ visible: true })`, never with breakpoint classes. That is also why
+  the running list's `id` is passed in (`timer-list-desktop` /
+  `timer-list-mobile`): two copies are mounted, and each disclosure's
+  `aria-controls` has to resolve to its own one.
 * `div.group` is the one class-based hook: it is `TimeEntryRow`'s row grid and
   the only `group` class in the app.
 
@@ -155,6 +166,6 @@ Roles, labels and headings first (`helpers/dom.ts`). Two notes:
 Other suites on this machine also use `tick_test`. They work in their own orgs,
 and `db:seed` only resets the "Hollow Studio" org and `mara@example.com`, so the
 two coexist — but running another suite that reseeds *at the same time* as this
-one will disturb it. A full run (both projects, 54 tests as of this writing)
+one will disturb it. A full run (both projects, 61 tests as of this writing)
 takes about 2 minutes once the build is cached; add ~10-15s the first time,
 for the build and `db:push`/`db:seed`.

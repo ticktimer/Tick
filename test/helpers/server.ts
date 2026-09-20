@@ -366,6 +366,34 @@ export async function registerAccount(
   return { client, user: res.body, email, password, name, response: res }
 }
 
+/**
+ * Stops every timer this client has running, oldest first, and trashes the
+ * entries they persisted.
+ *
+ * Cleanup blocks used to blind-fire `POST /api/timer/stop` because a user
+ * could only ever have one running row; with several (Tick#37) there is no
+ * such single target, so ask the server which ids are live and stop each.
+ *
+ * The old blind stop left nothing behind: a lone timer stopped microseconds
+ * after it started was always under a second, so the server discarded it.
+ * These tests hold timers across `sleep(1100)` and start up to the cap, so a
+ * sweep now persists real ended entries — up to ten of them. Left in place
+ * they would be invisible today (no test counts entries after a cleanup) and
+ * a flake tomorrow, so the sweep removes what it created, the way its e2e
+ * twin in `test/e2e/helpers/api.ts` already does. Safe (and silent) when
+ * nothing is running.
+ */
+export async function stopAllTimers(api: ApiClient): Promise<void> {
+  const res = await api.get<{ entryId: string }[]>('/api/timers')
+  if (res.status !== 200 || !Array.isArray(res.body)) return
+  for (const timer of res.body) {
+    const stopped = await api.post<{ id: string } | null>(`/api/timers/${timer.entryId}/stop`)
+    // null = under a second, discarded server-side; nothing to clean up.
+    if (stopped.status !== 200 || !stopped.body?.id) continue
+    await api.del(`/api/entries/${stopped.body.id}`)
+  }
+}
+
 /** A second, independent session for an existing account. */
 export async function loginAs(
   email: string,

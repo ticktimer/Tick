@@ -12,8 +12,11 @@
 // at its top/bottom edges (immediate drag, no second long-press); tap = start
 // again, as on desktop. While a touch drag is live, touchmove is prevented
 // (non-passive) so the browser never steals the gesture for scrolling.
-// The running timer renders as a live non-interactive block growing to now.
-import type { EntryDto } from '#shared/types'
+// Every running timer renders as a live non-interactive block growing to now
+// (ticktimer/Tick#37 — there can be several). Two live blocks that overlap in
+// time simply overlap on the grid, exactly as two ended entries already do.
+import type { EntryDto, TimerState } from '#shared/types'
+import { MAX_RUNNING_TIMERS } from '#shared/utils/timers'
 
 const HOUR_PX = 48
 const SNAP = 5
@@ -80,9 +83,8 @@ const hourBounds = computed(() => {
     const s = new Date(e.start).getTime()
     consider(s, s + e.durationSec * 1000)
   }
-  if (timer.timer) {
-    const s = new Date(timer.timer.start).getTime()
-    consider(s, now.value)
+  for (const t of timer.timers) {
+    consider(new Date(t.start).getTime(), now.value)
   }
   return { h0: Math.max(0, h0), h1: Math.min(24, h1) }
 })
@@ -440,24 +442,28 @@ function openEntry(entry: EntryDto) {
 
 const busy = ref(false)
 
+/** Starts an ADDITIONAL timer for this block; nothing already running stops. */
 async function startAgain(entry: EntryDto) {
   if (suppressClick.value || busy.value) return
   busy.value = true
   try {
-    if (timer.running) {
-      const dto = await timer.stop()
-      if (dto && dayStartOf(new Date(dto.start).getTime()) >= calendar.rangeStart && new Date(dto.start).getTime() < calendar.rangeEnd) {
-        calendar.entries.push(dto)
-      }
-    }
     await timer.start({
       name: entry.name,
       refType: entry.ref?.refType,
       refId: entry.ref?.refId,
       billable: entry.billable
     })
-  } catch {
-    await timer.hydrate()
+  } catch (err) {
+    if (isTimerCapError(err)) {
+      toast.add({
+        title: timerCapMessage(err),
+        description: `Stop one of the ${MAX_RUNNING_TIMERS} running timers before starting another.`,
+        icon: 'i-lucide-alarm-clock-off',
+        color: 'neutral'
+      })
+    } else {
+      await timer.hydrate()
+    }
   } finally {
     busy.value = false
   }
@@ -549,25 +555,39 @@ const ghost = computed(() => {
   }
 })
 
-/** Live block for the running timer (non-draggable, grows to now). */
-const runningBlock = computed(() => {
-  if (!timer.timer) return null
-  const startTs = new Date(timer.timer.start).getTime()
+/** Live blocks, one per running timer (non-draggable, each growing to now). */
+interface RunningBlock {
+  id: string
+  dayIdx: number
+  top: number
+  h: number
+  billable: boolean
+  name: string
+  sub: string
+}
+
+function runningBlockOf(t: TimerState): RunningBlock | null {
+  const startTs = new Date(t.start).getTime()
   const dayTs = dayStartOf(startTs)
   const di = calendar.days.indexOf(dayTs)
   if (di < 0) return null
   const startMin = (startTs - dayTs) / 60_000
-  const endTs = startTs + timer.elapsedSec * 1000
+  const endTs = startTs + timer.elapsedFor(t.entryId) * 1000
   const endMin = Math.min(1440, (endTs - dayTs) / 60_000)
   return {
+    id: t.entryId,
     dayIdx: di,
     top: topOf(startMin),
     h: heightOf(startMin, endMin),
-    billable: timer.timer.billable,
-    name: timer.timer.name || 'Untitled entry',
+    billable: t.billable,
+    name: t.name || 'Untitled entry',
     sub: `${formatTime(startTs, timeZone.value)} – now`
   }
-})
+}
+
+const runningBlocks = computed<RunningBlock[]>(() =>
+  timer.timers.map(runningBlockOf).filter((b): b is RunningBlock => b !== null)
+)
 
 /** Accent "now" line on today (only when inside the visible window). */
 const nowLine = computed(() => {
@@ -723,20 +743,22 @@ function blockEdge(billable: boolean): string {
             </template>
           </template>
 
-          <!-- Running timer: live, non-interactive -->
+          <!-- Running timers: live, non-interactive. Several may overlap in
+               time; they overlap visually, exactly as ended entries do. -->
           <div
-            v-if="runningBlock && runningBlock.dayIdx === di"
+            v-for="rb in runningBlocks.filter(b => b.dayIdx === di)"
+            :key="rb.id"
             class="pointer-events-none absolute inset-x-[3px] z-[5] flex flex-col gap-px overflow-hidden rounded-sm px-1.5 py-1"
             :style="{
-              top: runningBlock.top + 'px',
-              height: runningBlock.h + 'px',
-              background: blockBg(runningBlock.billable),
+              top: rb.top + 'px',
+              height: rb.h + 'px',
+              background: blockBg(rb.billable),
               borderLeft: '2px solid var(--ui-primary)',
               boxShadow: '0 0 8px color-mix(in srgb, var(--ui-primary) 45%, transparent)'
             }"
           >
-            <span class="truncate text-[11px] font-medium leading-[1.25] text-highlighted">{{ runningBlock.name }}</span>
-            <span class="tnum truncate text-[10px] text-primary">{{ runningBlock.sub }}</span>
+            <span class="truncate text-[11px] font-medium leading-[1.25] text-highlighted">{{ rb.name }}</span>
+            <span class="tnum truncate text-[10px] text-primary">{{ rb.sub }}</span>
           </div>
 
           <!-- Drag-to-create ghost -->

@@ -1,12 +1,15 @@
 // /calendar week grid: seeded blocks render, clicking a block edits it (and
 // must NOT start tracking), the block's play button is the only thing that does.
 import { expect, test } from './helpers/test'
-import { clearRunningTimer, createEntry, deleteEntriesNamed } from './helpers/api'
+import { stopAllTimers, createEntry, deleteEntriesNamed, listTimers } from './helpers/api'
 import { timerInput, timerToggle } from './helpers/dom'
 import { SEED, startsWith, uniqueName } from './helpers/fixtures'
 
 /** Our own block: 3–5pm today, clear of the seeded 9:05/11:30/13:00 blocks. */
 const BLOCK = uniqueName('E2E block')
+
+/** Names this file starts through the UI, swept in afterEach alongside BLOCK. */
+const running: string[] = []
 
 function todaySlot(fromHour: number, toHour: number) {
   const now = new Date()
@@ -21,14 +24,15 @@ function block(page: import('@playwright/test').Page, name: string) {
 }
 
 test.beforeEach(async ({ api }) => {
-  await clearRunningTimer(api)
+  await stopAllTimers(api)
   await deleteEntriesNamed(api, BLOCK)
   await createEntry(api, { name: BLOCK, billable: true, ...todaySlot(15, 17) })
 })
 
 test.afterEach(async ({ api }) => {
-  await clearRunningTimer(api)
-  await deleteEntriesNamed(api, BLOCK)
+  await stopAllTimers(api)
+  await deleteEntriesNamed(api, BLOCK, ...running)
+  running.length = 0
 })
 
 test('the week grid renders the seeded blocks', async ({ page }) => {
@@ -60,9 +64,8 @@ test('clicking a block opens the edit dialog without starting the timer', async 
   await expect(dialog.getByLabel('What did you work on?')).toHaveValue(BLOCK)
 
   // The regression this guards: a bare block surface must never start
-  // tracking. The server is the authority — no running entry exists.
-  const timer = await api.get('/api/timer')
-  expect(await timer.text()).toBe('')
+  // tracking. The server is the authority — nothing is running at all.
+  expect(await listTimers(api)).toEqual([])
 
   await dialog.getByRole('button', { name: 'Cancel' }).click()
   await expect(dialog).toBeHidden()
@@ -81,9 +84,26 @@ test('the block play button starts the timer for that entry', async ({ page, api
   // No edit dialog opened alongside it.
   await expect(page.getByRole('heading', { name: 'Edit entry' })).toHaveCount(0)
 
-  const timer = await api.get('/api/timer')
-  expect(timer.ok()).toBe(true)
-  expect(((await timer.json()) as { name: string }).name).toBe(BLOCK)
+  // Exactly one timer, and it is this block's — the play button starts an
+  // additional timer now (ticktimer/Tick#37), so "one" is a real claim.
+  expect((await listTimers(api)).map(t => t.name)).toEqual([BLOCK])
+})
+
+test('the block play button starts a SECOND timer instead of replacing the first', async ({ page, api }) => {
+  await page.goto('/calendar')
+  await expect(block(page, BLOCK)).toBeVisible()
+
+  // Something is already running before the block is played.
+  const first = uniqueName('E2E calendar first')
+  running.push(first)
+  await timerInput(page).fill(first)
+  await timerToggle(page).click()
+  await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+
+  await page.getByRole('button', { name: `Start timer for ${BLOCK}` }).click()
+
+  // Both run, in start order — the first was never stopped (Tick#37).
+  await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([first, BLOCK])
 })
 
 // ── ticktimer/Tick#29 ───────────────────────────────────────────────────────

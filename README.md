@@ -4,7 +4,7 @@ Tick is a self-hosted, MIT-licensed time tracker for freelancers and small teams
 
 **Features**
 
-- Sticky timer bar: start typing, attach a client/project/task later, one running timer per user
+- Sticky timer bar: start typing, attach a client/project/task later, run several timers at once (up to 10)
 - Time page: entries grouped by day or project, `#tag` / `@name` / free-text filtering, bulk actions
 - Manual entries with forgiving natural-language date, time and duration parsing ("yesterday", "9a–11.20", "1h30")
 - Dashboard with hours, billable amounts and per-project breakdowns

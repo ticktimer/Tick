@@ -1,8 +1,21 @@
 // Mobile shell (<1024px): bottom tab bar, docked timer card, picker as a
 // bottom sheet. Runs in the `mobile` project only — 390×844 with touch.
 import { expect, test } from './helpers/test'
-import { clearRunningTimer, createEntry, deleteEntriesNamed, listEntries } from './helpers/api'
-import { bulkActionsBar, entryRow, group, picker, timerClock, timerInput, timerPlus, timerToggle } from './helpers/dom'
+import { stopAllTimers, createEntry, deleteEntriesNamed, listEntries } from './helpers/api'
+import {
+  addTimerButton,
+  bulkActionsBar,
+  entryRow,
+  group,
+  picker,
+  timerClock,
+  timerCount,
+  timerInput,
+  timerList,
+  timerListRow,
+  timerPlus,
+  timerToggle
+} from './helpers/dom'
 import { uniqueName } from './helpers/fixtures'
 
 const VIEWPORT = { width: 390, height: 844 }
@@ -26,11 +39,11 @@ function slot(hour: number, minutes = 30) {
 
 test.describe('mobile shell', { tag: '@mobile' }, () => {
   test.beforeEach(async ({ api }) => {
-    await clearRunningTimer(api)
+    await stopAllTimers(api)
   })
 
   test.afterEach(async ({ api }) => {
-    await clearRunningTimer(api)
+    await stopAllTimers(api)
     await deleteEntriesNamed(api, TIMER_NAME, ...created)
     created.clear()
   })
@@ -65,6 +78,70 @@ test.describe('mobile shell', { tag: '@mobile' }, () => {
     await expect(timerToggle(page)).toHaveAccessibleName('Start')
     await page.waitForURL('**/time')
     await expect(entryRow(group(page, 'Today'), TIMER_NAME)).toBeVisible()
+  })
+
+  // ── ticktimer/Tick#37 ────────────────────────────────────────────────────
+  // The layout reserves a fixed pb-[calc(150px+env(safe-area-inset-bottom))]
+  // for the dock, so the running list has to float ABOVE the card rather than
+  // add a row to it. If the card ever grows, the reserved padding stops
+  // matching and the last entry row slides under the dock.
+  test('the running list opens above the dock without changing its height', async ({ page }) => {
+    await page.goto('/time')
+
+    const dock = page.getByRole('region', { name: 'Timer' }).filter({ visible: true })
+    const idle = await dock.boundingBox()
+    expect(idle).not.toBeNull()
+
+    await timerInput(page).fill(TIMER_NAME)
+    await timerToggle(page).click()
+    await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+    await expect(timerCount(page)).toBeVisible()
+
+    // Row 2 gained a count chip and an "Add a timer" button — both shorter
+    // than the "+" that already set that row's height.
+    const withTimer = await dock.boundingBox()
+    expect(Math.round(withTimer!.height)).toBe(Math.round(idle!.height))
+    expect(Math.round(withTimer!.y)).toBe(Math.round(idle!.y))
+
+    await timerCount(page).click()
+    await expect(timerList(page)).toBeVisible()
+    await expect(timerListRow(page, TIMER_NAME)).toBeVisible()
+
+    const opened = await dock.boundingBox()
+    expect(Math.round(opened!.height)).toBe(Math.round(idle!.height))
+    expect(Math.round(opened!.y)).toBe(Math.round(idle!.y))
+
+    // …and the list really is an overlay: its whole box sits above the card.
+    // Polled, because it rises in on mount (tick-rise, 180ms).
+    await expect.poll(async () => {
+      const b = await timerList(page).boundingBox()
+      return b ? Math.round(b.y + b.height) <= Math.round(opened!.y) : null
+    }).toBe(true)
+  })
+
+  test('"Add a timer" starts a second one from the dock', async ({ page }) => {
+    const second = name('E2E mobile second')
+    await page.goto('/time')
+
+    await timerInput(page).fill(TIMER_NAME)
+    await timerToggle(page).click()
+    await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+
+    await addTimerButton(page).click()
+    await expect(timerToggle(page)).toHaveAccessibleName('Start')
+    await timerInput(page).fill(second)
+    await timerToggle(page).click()
+    await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+
+    await timerCount(page).click()
+    await expect(timerListRow(page, TIMER_NAME)).toBeVisible()
+    await expect(timerListRow(page, second)).toBeVisible()
+
+    // Stopping one from the list leaves the other running and stays put.
+    await timerListRow(page, TIMER_NAME).getByRole('button', { name: `Stop ${TIMER_NAME}`, exact: true }).click()
+    await expect(timerListRow(page, TIMER_NAME)).toHaveCount(0)
+    await expect(timerListRow(page, second)).toBeVisible()
+    await expect(timerToggle(page)).toHaveAccessibleName('Stop')
   })
 
   test('the picker opens as a bottom sheet', async ({ page }) => {

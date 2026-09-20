@@ -1,5 +1,5 @@
-// PATCH /api/entries/:id — partial edit of an ended entry (the running timer
-// is edited via PATCH /api/timer). Keeps start < end true after the merge.
+// PATCH /api/entries/:id — partial edit of an ended entry (a running timer
+// is edited via PATCH /api/timers/:id). Keeps start < end true after the merge.
 import { z } from 'zod'
 
 const isoDate = z

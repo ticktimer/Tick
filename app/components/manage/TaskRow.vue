@@ -4,13 +4,15 @@
 // entry-count/tracked/rate columns collapse into one secondary line under the
 // name, which otherwise gets no width next to the fixed columns.
 
+import { MAX_RUNNING_TIMERS } from '#shared/utils/timers'
+
 const props = defineProps<{ task: TaskDto }>()
 const emit = defineEmits<{ edit: [] }>()
 
 const timer = useTimerStore()
-const entriesStore = useEntriesStore()
 const catalog = useCatalogStore()
 const router = useRouter()
+const toast = useToast()
 
 const entriesLabel = computed(() => {
   const n = props.task.entryCount
@@ -35,24 +37,31 @@ async function toggleDone() {
   } catch { /* refetch happens inside the store on success; ignore transient errors */ }
 }
 
-// ▶ — copies name/ref/billable onto the timer and starts (stops a running timer first).
+// ▶ — starts an ADDITIONAL timer on this task; anything already running keeps
+// running (ticktimer/Tick#37). Only the cap refuses, and that is an expected
+// answer, so it gets a toast rather than a silent re-sync.
 const starting = ref(false)
 
 async function start() {
   if (starting.value) return
   starting.value = true
   try {
-    if (timer.running) {
-      const dto = await timer.stop()
-      if (dto) entriesStore.applyStoppedEntry(dto)
-    }
     const billable = props.task.projectId
       ? (catalog.projects.find(p => p.id === props.task.projectId)?.billableDefault ?? true)
       : true
     await timer.start({ name: props.task.name, refType: 'task', refId: props.task.id, billable })
     router.push('/time')
-  } catch {
-    await timer.hydrate()
+  } catch (err) {
+    if (isTimerCapError(err)) {
+      toast.add({
+        title: timerCapMessage(err),
+        description: `Stop one of the ${MAX_RUNNING_TIMERS} running timers before starting another.`,
+        icon: 'i-lucide-alarm-clock-off',
+        color: 'neutral'
+      })
+    } else {
+      await timer.hydrate()
+    }
   } finally {
     starting.value = false
   }

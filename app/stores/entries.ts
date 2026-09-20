@@ -178,7 +178,7 @@ export const useEntriesStore = defineStore('entries', () => {
     await refresh()
   }
 
-  /** Insert the EntryDto returned by POST /api/timer/stop at the top of Today. */
+  /** Insert the EntryDto returned by POST /api/timers/:id/stop at the top of Today. */
   function applyStoppedEntry(dto: EntryDto) {
     entries.value = entries.value.filter(e => e.id !== dto.id)
     entries.value.unshift(dto)

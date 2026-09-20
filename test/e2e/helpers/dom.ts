@@ -24,6 +24,38 @@ export function timerPlus(page: Page): Locator {
   return page.getByRole('button', { name: 'Add client, project or task' }).filter({ visible: true })
 }
 
+/**
+ * The visible running-count chip — the disclosure for the running list
+ * (ticktimer/Tick#37). Desktop prints "2 running" and takes its accessible name
+ * from that text; the 390px dock prints just the digit and carries the full
+ * "2 timers running" as its label. Both end in "running".
+ */
+export function timerCount(page: Page): Locator {
+  return page.getByRole('button', { name: /running$/ }).filter({ visible: true })
+}
+
+/** The visible "Add a timer" toggle — only rendered while something runs. */
+export function addTimerButton(page: Page): Locator {
+  return page.getByRole('button', { name: 'Add a timer' }).filter({ visible: true })
+}
+
+/** The visible running-timer list (desktop disclosure / mobile dock overlay). */
+export function timerList(page: Page): Locator {
+  return page.getByRole('list', { name: 'Running timers' }).filter({ visible: true })
+}
+
+/** One row of the running list, addressed by that timer's name. */
+export function timerListRow(page: Page, name: string): Locator {
+  return timerList(page).getByRole('listitem').filter({
+    has: page.getByRole('button', { name: `Stop ${name}`, exact: true })
+  })
+}
+
+/** A running-list row's live clock. `.tnum` is the only tabular figure in a row. */
+export function timerRowClock(row: Locator): Locator {
+  return row.locator('.tnum')
+}
+
 /** Chain chip next to the timer description, e.g. "Website redesign · Acme Co". */
 export function timerChain(page: Page): Locator {
   return page.getByRole('button', { name: 'Remove client, project or task' })

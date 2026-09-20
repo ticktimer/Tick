@@ -1,12 +1,32 @@
 <script setup lang="ts">
 // Mobile docked timer card — sits above the tab bar on every screen (<1024px),
 // replacing the desktop TimerBar. Row 1: description input, 22px tnum clock,
-// 44px circular start/stop. Row 2: chain chip, rate chip, + button (opens the
-// picker sheet). Same store wiring as ShellTimerBar.
+// 44px circular start/stop. Row 2: running-count chip, chain chip, rate chip,
+// "add a timer" and + (opens the picker sheet). Same store wiring as
+// ShellTimerBar.
+//
+// The dock's HEIGHT IS FIXED: app/layouts/default.vue reserves
+// pb-[calc(150px+env(safe-area-inset-bottom))] for it, so #37's running list
+// renders as an overlay floating *above* the card (absolute, bottom-full), not
+// as a third row. Row 2's new controls are the same 30px as the + already
+// there, so the card measures exactly what it did before.
+import { MAX_RUNNING_TIMERS } from '#shared/utils/timers'
+
 const timer = useTimerStore()
 const entries = useEntriesStore()
 const ui = useUiStore()
 const router = useRouter()
+const toast = useToast()
+
+/** Literal, not useId(): the desktop bar mounts a second list at the same time
+ *  (one of the two is CSS-hidden) and the two ids must not collide. */
+const LIST_ID = 'timer-list-mobile'
+
+const listOpen = ref(false)
+
+watch(() => timer.count, (n) => {
+  if (n === 0) listOpen.value = false
+})
 
 // ── Description input (debounced while running, same as TimerBar) ──────────
 const nameLocal = ref(timer.currentName)
@@ -15,24 +35,44 @@ watch(() => timer.currentName, (v) => {
   if (v !== nameLocal.value) nameLocal.value = v
 })
 
+// The debounced rename captures BOTH which timer it is renaming and what to
+// call it, at the keystroke that armed it. Resolving either 800ms later loses
+// the edit: a refocus hydrate can pull in a newer timer started elsewhere,
+// `activeTimer` moves to it, the currentName watcher rewrites the input, and
+// the pending rename then reads that box and writes the new timer's own name
+// back to itself. The typed text reaches nothing and vanishes mid-edit.
 let nameDebounce: ReturnType<typeof setTimeout> | null = null
+let pendingName: { id: string | null, text: string } | null = null
 
-function onNameInput(e: Event) {
-  nameLocal.value = (e.target as HTMLInputElement).value
-  if (!timer.running) {
-    timer.setName(nameLocal.value)
-    return
-  }
+function armName(text: string) {
+  pendingName = { id: timer.activeTimer?.entryId ?? null, text }
   if (nameDebounce) clearTimeout(nameDebounce)
-  nameDebounce = setTimeout(() => timer.setName(nameLocal.value), 800)
+  nameDebounce = setTimeout(commitName, 800)
 }
 
-function flushName() {
+function commitName() {
   if (nameDebounce) {
     clearTimeout(nameDebounce)
     nameDebounce = null
   }
-  timer.setName(nameLocal.value)
+  const pending = pendingName
+  pendingName = null
+  if (pending) timer.setName(pending.text, pending.id)
+}
+
+function onNameInput(e: Event) {
+  nameLocal.value = (e.target as HTMLInputElement).value
+  // Composing edits the draft, which has no id and no round trip to debounce.
+  if (timer.composing) {
+    timer.setName(nameLocal.value, null)
+    return
+  }
+  armName(nameLocal.value)
+}
+
+/** Commit a pending rename now (blur, and before a stop). */
+function flushName() {
+  commitName()
 }
 
 // ── Floating dock surface (ticktimer/Tick#34) ──────────────────────────────
@@ -48,6 +88,11 @@ function flushName() {
 // the one primary-tinted surface on the screen — and brightens into a halo while
 // the timer runs. The *pulsing* glow belongs to the play button; a whole pulsing
 // card would be too much.
+//
+// #37's running-list overlay reuses that reasoning rather than restating it: it
+// takes the same bg-default / dark:bg-elevated fill and the same lift shadow, so
+// every text token on it keeps the contrast it was measured at — but a NEUTRAL
+// hairline, because the primary edge is what identifies the dock itself.
 const dockShadow = computed(() => {
   const lift = '0 12px 32px -10px color-mix(in srgb, var(--ui-bg-inverted) 55%, transparent)'
   const edge = timer.running
@@ -55,6 +100,8 @@ const dockShadow = computed(() => {
     : '0 0 0 1px color-mix(in srgb, var(--ui-primary) 45%, transparent), 0 0 18px -8px color-mix(in srgb, var(--ui-primary) 30%, transparent)'
   return `${lift}, ${edge}`
 })
+
+const listShadow = '0 12px 32px -10px color-mix(in srgb, var(--ui-bg-inverted) 55%, transparent)'
 
 // ── Chips ──────────────────────────────────────────────────────────────────
 const chainLabel = computed(() => {
@@ -68,31 +115,69 @@ const rateLabel = computed(() => {
   return timer.resolvedRate != null ? `$${timer.resolvedRate}/h` : 'Billable'
 })
 
-// ── Clock ──────────────────────────────────────────────────────────────────
-const clock = computed(() => {
-  const s = timer.elapsedSec
-  const h = String(Math.floor(s / 3600)).padStart(2, '0')
-  const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
-  const sec = String(s % 60).padStart(2, '0')
-  return `${h}:${m}:${sec}`
-})
+/** The count chip prints just the digit at this width; the label carries the
+ *  rest, and "2" is a substring of it, so speech input still matches. */
+const countLabel = computed(() =>
+  `${timer.count} ${timer.count === 1 ? 'timer' : 'timers'} running`
+)
+
+// ── Picker target ──────────────────────────────────────────────────────────
+// Named up front so a background re-hydrate can't move "the timer" while the
+// sheet is open (see the ui store's pickerTimerId).
+function pickerTarget(): string | null {
+  return timer.composing ? null : (timer.activeTimer?.entryId ?? null)
+}
+
+// ── Clock — derived from the store's single shared `nowMs` ─────────────────
+const clock = computed(() => formatClock(timer.activeElapsedSec))
+
+// ── Add a timer ────────────────────────────────────────────────────────────
+const capReached = computed(() => timer.atCap && !timer.composing)
+
+const addTitle = computed(() =>
+  capReached.value ? `Timer limit reached (${MAX_RUNNING_TIMERS} running)` : 'Add a timer'
+)
+
+function toggleCompose() {
+  if (timer.composing) timer.cancelCompose()
+  else timer.compose()
+}
+
+function capToast(err: unknown) {
+  toast.add({
+    title: timerCapMessage(err),
+    description: `Stop one of the ${MAX_RUNNING_TIMERS} running timers before starting another.`,
+    icon: 'i-lucide-alarm-clock-off',
+    color: 'neutral'
+  })
+}
 
 // ── Start / stop ───────────────────────────────────────────────────────────
+const busy = ref(false)
+
 async function toggle() {
+  if (busy.value) return
+  busy.value = true
   try {
-    if (timer.running) {
+    if (timer.composing) {
+      timer.setName(nameLocal.value, null)
+      const started = await timer.start()
+      // A pin can be holding the card on a different timer — show the list so
+      // the one just started lands somewhere visible.
+      if (timer.activeTimer?.entryId !== started.entryId) listOpen.value = true
+    } else {
       flushName()
       const dto = await timer.stop()
       if (dto) {
         entries.applyStoppedEntry(dto)
         router.push('/time')
       }
-    } else {
-      timer.setName(nameLocal.value)
-      await timer.start()
     }
-  } catch {
-    await timer.hydrate()
+  } catch (err) {
+    if (isTimerCapError(err)) capToast(err)
+    else await timer.hydrate()
+  } finally {
+    busy.value = false
   }
 }
 </script>
@@ -101,9 +186,19 @@ async function toggle() {
   <div
     role="region"
     aria-label="Timer"
-    class="mx-3 flex flex-col gap-2 rounded-xl border border-accented bg-default py-2.5 dark:bg-elevated pr-2.5 pl-3.5 has-[input:focus-visible]:border-primary has-[input:focus-visible]:ring-1 has-[input:focus-visible]:ring-primary"
+    class="relative mx-3 flex flex-col gap-2 rounded-xl border border-accented bg-default py-2.5 dark:bg-elevated pr-2.5 pl-3.5 has-[input:focus-visible]:border-primary has-[input:focus-visible]:ring-1 has-[input:focus-visible]:ring-primary"
     :style="{ boxShadow: dockShadow }"
   >
+    <!-- Running list: an overlay ABOVE the dock, never a row inside it — the
+         layout reserves a fixed 150px for this card and that must not move. -->
+    <div
+      v-if="listOpen && timer.count >= 1"
+      class="tick-rise absolute inset-x-0 bottom-full z-10 mb-2 max-h-[min(50vh,300px)] overflow-y-auto rounded-xl bg-default p-1 ring-1 ring-default ring-inset dark:bg-elevated"
+      :style="{ boxShadow: listShadow }"
+    >
+      <ShellTimerList :list-id="LIST_ID" />
+    </div>
+
     <!-- Row 1: description · clock · start/stop -->
     <div class="flex items-center gap-2">
       <input
@@ -116,9 +211,12 @@ async function toggle() {
         @change="flushName"
         @keydown.enter.prevent="toggle"
       >
+      <!-- text-primary, not text-primary-400 — see the note on TimerBar's
+           clock: main.css steps light mode's --ui-primary to primary-700 so
+           accent text clears AA, and a hard-coded shade opts out of it. -->
       <span
         class="tnum shrink-0 text-[22px] font-medium tracking-[0.01em]"
-        :class="timer.running ? 'text-primary-400 dark:text-primary-300' : 'text-muted'"
+        :class="timer.composing ? 'text-muted' : 'text-primary dark:text-primary-300'"
       >
         {{ clock }}
       </span>
@@ -126,16 +224,42 @@ async function toggle() {
         color="primary"
         variant="outline"
         square
-        :icon="timer.running ? 'i-lucide-square' : 'i-lucide-play'"
-        :aria-label="timer.running ? 'Stop' : 'Start'"
+        :icon="timer.composing ? 'i-lucide-play' : 'i-lucide-square'"
+        :aria-label="timer.composing ? 'Start' : 'Stop'"
         class="size-11 shrink-0 justify-center rounded-full"
-        :class="timer.running ? 'tick-glow text-primary-400 dark:text-primary-300' : ''"
+        :class="timer.composing ? '' : 'tick-glow text-primary dark:text-primary-300'"
         @click="toggle"
       />
     </div>
 
-    <!-- Row 2: chain chip · rate chip · + -->
+    <!-- Row 2: count chip · chain chip · rate chip · add a timer · + -->
     <div class="flex min-w-0 items-center gap-1.5">
+      <!-- Count chip leads the row: it summarises everything running, rather
+           than saying anything about the timer the card is showing. Neutral
+           outlined, like the two buttons at the other end of the row — as a
+           primary-tinted chip it failed the contrast sweep, and the dock is
+           already the one primary-tinted surface on the screen (#34).
+           h-[30px] matches those buttons, which is what sets this row's
+           height, so the dock still measures exactly what it did. -->
+      <UButton
+        v-if="timer.count >= 1"
+        icon="i-lucide-timer"
+        trailing-icon="i-lucide-chevron-down"
+        color="neutral"
+        variant="outline"
+        :aria-label="countLabel"
+        :aria-expanded="listOpen"
+        :aria-controls="LIST_ID"
+        class="relative h-[30px] shrink-0 gap-1 px-1.5 text-[11px] after:absolute after:-inset-1.5 after:content-['']"
+        :ui="{
+          leadingIcon: 'size-3',
+          trailingIcon: `size-3 transition-transform ${listOpen ? 'rotate-180' : ''}`
+        }"
+        @click="listOpen = !listOpen"
+      >
+        <span class="tnum">{{ timer.count }}</span>
+      </UButton>
+
       <span
         v-if="chainLabel"
         class="flex min-w-0 items-center gap-1.5 rounded-sm bg-primary/10 py-1 pr-[5px] pl-2.5 text-[11px] text-primary ring-1 ring-primary/25 ring-inset"
@@ -150,7 +274,9 @@ async function toggle() {
           <UIcon name="i-lucide-x" class="size-2.5" />
         </button>
       </span>
-      <span v-else class="text-[11px] text-muted">No client, project or task</span>
+      <!-- min-w-0 so this shrinks instead of pushing the row wide: at 390px the
+           count chip and "add a timer" now share the row with it. -->
+      <span v-else class="min-w-0 truncate text-[11px] text-muted">No client, project or task</span>
 
       <UBadge
         color="neutral"
@@ -168,14 +294,30 @@ async function toggle() {
       </UBadge>
 
       <UButton
+        v-if="timer.count >= 1"
+        icon="i-lucide-alarm-clock-plus"
+        :color="timer.composing ? 'primary' : 'neutral'"
+        variant="outline"
+        square
+        aria-label="Add a timer"
+        :aria-pressed="timer.composing"
+        :disabled="capReached"
+        :title="addTitle"
+        class="relative ml-auto size-[30px] shrink-0 justify-center after:absolute after:-inset-1.5 after:content-['']"
+        :ui="{ leadingIcon: 'size-3.5' }"
+        @click="toggleCompose"
+      />
+
+      <UButton
         icon="i-lucide-plus"
         color="neutral"
         variant="outline"
         square
         aria-label="Add client, project or task"
-        class="relative ml-auto size-[30px] shrink-0 justify-center after:absolute after:-inset-2 after:content-['']"
+        class="relative size-[30px] shrink-0 justify-center after:absolute after:-inset-2 after:content-['']"
+        :class="timer.count >= 1 ? '' : 'ml-auto'"
         :ui="{ leadingIcon: 'size-3.5' }"
-        @click="ui.openPicker('timer', 'task')"
+        @click="ui.openPicker('timer', 'task', pickerTarget())"
       />
     </div>
   </div>

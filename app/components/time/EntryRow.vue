@@ -3,8 +3,9 @@
 // Desktop grid: checkbox | name + chain | time range | $ toggle | duration +
 // amount | actions. Selection + billable talk to the entries store directly;
 // delete bubbles up so the page can show the undo toast (Rule 4); ▶ copies
-// name/ref/billable onto the timer and starts it; ✎ (and clicking the name)
-// opens the Manual-entry dialog in edit mode via ui.openEdit.
+// name/ref/billable onto a NEW timer alongside whatever is already running
+// (ticktimer/Tick#37 — it used to stop the running one first); ✎ (and clicking
+// the name) opens the Manual-entry dialog in edit mode via ui.openEdit.
 // Mobile (<1024px) the row collapses to name+chain | duration+range | …,
 // and touch swipes take over: swipe LEFT reveals a 72px Delete action, swipe
 // RIGHT starts the entry again. Gestures are touch-only (desktop hover
@@ -14,6 +15,7 @@
 // actions; separate icons there leave the name column no room at 390px.
 import type { DropdownMenuItem } from '@nuxt/ui'
 import type { EntryDto } from '#shared/types'
+import { MAX_RUNNING_TIMERS } from '#shared/utils/timers'
 
 const props = withDefaults(
   defineProps<{
@@ -33,6 +35,7 @@ const emit = defineEmits<{ delete: [] }>()
 const entriesStore = useEntriesStore()
 const timer = useTimerStore()
 const ui = useUiStore()
+const toast = useToast()
 // Times print in the browser's zone on both renders (ticktimer/Tick#7).
 const { timeZone } = useTimeZone()
 
@@ -75,23 +78,34 @@ async function toggleBillable() {
   }
 }
 
-/** ▶ Start again — stop anything running, then start with this entry's name/ref/billable. */
+/**
+ * ▶ Start again — starts an additional timer with this entry's
+ * name/ref/billable. Nothing is stopped: running several at once is the
+ * feature (ticktimer/Tick#37). The one refusal is the cap, which is an
+ * expected answer rather than a failure, so it gets a toast instead of a
+ * silent re-sync.
+ */
 async function startAgain() {
   if (busy.value) return
   busy.value = true
   try {
-    if (timer.running) {
-      const dto = await timer.stop()
-      if (dto) entriesStore.applyStoppedEntry(dto)
-    }
     await timer.start({
       name: props.entry.name,
       refType: props.entry.ref?.refType,
       refId: props.entry.ref?.refId,
       billable: props.entry.billable
     })
-  } catch {
-    await timer.hydrate()
+  } catch (err) {
+    if (isTimerCapError(err)) {
+      toast.add({
+        title: timerCapMessage(err),
+        description: `Stop one of the ${MAX_RUNNING_TIMERS} running timers before starting another.`,
+        icon: 'i-lucide-alarm-clock-off',
+        color: 'neutral'
+      })
+    } else {
+      await timer.hydrate()
+    }
   } finally {
     busy.value = false
   }

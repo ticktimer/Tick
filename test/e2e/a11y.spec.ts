@@ -9,8 +9,8 @@
 import AxeBuilder from '@axe-core/playwright'
 import type { AxeResults } from 'axe-core'
 import type { Page } from '@playwright/test'
-import { createTask, deleteTasksNamed } from './helpers/api'
-import { picker, timerPlus } from './helpers/dom'
+import { createTask, deleteTasksNamed, stopAllTimers } from './helpers/api'
+import { addTimerButton, picker, timerCount, timerInput, timerList, timerPlus, timerToggle } from './helpers/dom'
 import { uniqueName } from './helpers/fixtures'
 import { expect, test } from './helpers/test'
 
@@ -94,6 +94,34 @@ for (const preset of ['Nocturne', 'Daylight'] as const) {
         await checkA11y(page, `${path} (${preset})`)
       })
     }
+
+    // ticktimer/Tick#37 — the running list is a whole new surface in the shell
+    // and it is only on screen once two things run and the disclosure is open,
+    // so a plain page-load scan never reaches it. Both shipped presets, because
+    // the list's fill and every text token on it are mode-dependent.
+    test(`the running-timer list has no violations (${preset})`, async ({ page, api }) => {
+      const first = uniqueName('E2E a11y timer one')
+      const second = uniqueName('E2E a11y timer two')
+      await applyPreset(page, preset)
+      await page.goto('/time')
+      try {
+        await timerInput(page).fill(first)
+        await timerToggle(page).click()
+        await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+
+        await addTimerButton(page).click()
+        await timerInput(page).fill(second)
+        await timerToggle(page).click()
+        await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+
+        await timerCount(page).click()
+        await expect(timerList(page)).toBeVisible()
+        await checkA11y(page, `running-timer list (${preset})`)
+      } finally {
+        // stopAllTimers also deletes the entries the two timers produced.
+        await stopAllTimers(api)
+      }
+    })
   })
 }
 
