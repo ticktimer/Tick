@@ -158,8 +158,10 @@ export const useTimerStore = defineStore('timer', () => {
     listOpen.value = true
   }
 
+  /** Cancel = discard: the draft goes too, so the next "Add a timer" is blank. */
   function cancelCompose() {
     composingRaw.value = false
+    clearDraft()
   }
 
   // ── Getters ────────────────────────────────────────────────────────────────

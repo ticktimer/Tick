@@ -87,17 +87,21 @@ function flushName() {
 //
 // #37's running-list overlay reuses that reasoning rather than restating it: it
 // takes the same bg-default / dark:bg-elevated fill and the same lift shadow, so
-// every text token on it keeps the contrast it was measured at — but a NEUTRAL
-// hairline, because the primary edge is what identifies the dock itself.
-const dockShadow = computed(() => {
-  const lift = '0 12px 32px -10px color-mix(in srgb, var(--ui-bg-inverted) 55%, transparent)'
-  const edge = timer.running
-    ? '0 0 0 1px var(--ui-primary), 0 0 22px -6px color-mix(in srgb, var(--ui-primary) 55%, transparent)'
-    : '0 0 0 1px color-mix(in srgb, var(--ui-primary) 45%, transparent), 0 0 18px -8px color-mix(in srgb, var(--ui-primary) 30%, transparent)'
-  return `${lift}, ${edge}`
-})
+// every text token on it keeps the contrast it was measured at, and (since the
+// light-mode pass) the dock's own idle edge — see listShadow below.
+const lift = '0 12px 32px -10px color-mix(in srgb, var(--ui-bg-inverted) 55%, transparent)'
+const idleEdge = '0 0 0 1px color-mix(in srgb, var(--ui-primary) 45%, transparent), 0 0 18px -8px color-mix(in srgb, var(--ui-primary) 30%, transparent)'
+const runningEdge = '0 0 0 1px var(--ui-primary), 0 0 22px -6px color-mix(in srgb, var(--ui-primary) 55%, transparent)'
 
-const listShadow = '0 12px 32px -10px color-mix(in srgb, var(--ui-bg-inverted) 55%, transparent)'
+const dockShadow = computed(() => `${lift}, ${timer.running ? runningEdge : idleEdge}`)
+
+// The list first shipped with a neutral hairline, on the theory that the
+// primary edge is what identifies the dock. In light mode that hairline all
+// but disappeared against the entry cards the overlay floats over. The list
+// is the dock's own disclosure, so it takes the dock's idle edge — the 45%
+// hairline and the soft glow — never the brighter running edge, which is the
+// play button's signal, not a panel's.
+const listShadow = `${lift}, ${idleEdge}`
 
 // ── Chips ──────────────────────────────────────────────────────────────────
 const chainLabel = computed(() => {
@@ -136,6 +140,9 @@ const addTitle = computed(() =>
   capReached.value ? `Timer limit reached (${MAX_RUNNING_TIMERS} running)` : 'Add a timer'
 )
 
+// While composing, the same slot is a ✕ — "Cancel new timer" — because a
+// pressed-looking "Add a timer" told nobody it was the way back out. Cancel
+// discards the draft and hands the card back to the pinned (else newest) timer.
 function toggleCompose() {
   if (timer.composing) {
     timer.cancelCompose()
@@ -192,10 +199,28 @@ async function toggle() {
          layout reserves a fixed 150px for this card and that must not move. -->
     <div
       v-if="timer.listOpen && timer.count >= 1"
-      class="tick-rise absolute inset-x-0 bottom-full z-10 mb-2 max-h-[min(50vh,300px)] overflow-y-auto rounded-xl bg-default p-1 ring-1 ring-default ring-inset dark:bg-elevated"
+      class="tick-rise absolute inset-x-0 bottom-full z-10 mb-2 flex max-h-[min(50vh,300px)] flex-col rounded-xl bg-default p-1 dark:bg-elevated"
       :style="{ boxShadow: listShadow }"
     >
-      <ShellTimerList :list-id="LIST_ID" />
+      <!-- A way out that isn't the chip it floated up from: the chip sits in
+           the dock *below* the overlay, so closing meant reaching back past
+           the list to the thing that opened it. 36px, extended to 44 for touch. -->
+      <div class="flex shrink-0 items-center justify-between pl-2.5">
+        <span class="text-[11px] text-muted">Running timers</span>
+        <UButton
+          icon="i-lucide-x"
+          color="neutral"
+          variant="ghost"
+          square
+          aria-label="Close the running timers"
+          class="relative size-9 justify-center after:absolute after:-inset-1 after:content-['']"
+          :ui="{ leadingIcon: 'size-4' }"
+          @click="timer.closeList()"
+        />
+      </div>
+      <div class="min-h-0 overflow-y-auto">
+        <ShellTimerList :list-id="LIST_ID" />
+      </div>
     </div>
 
     <!-- Row 1: description · clock · start/stop -->
@@ -210,6 +235,7 @@ async function toggle() {
         @input="onNameInput"
         @change="flushName"
         @keydown.enter.prevent="toggle"
+        @keydown.esc="timer.composing && timer.count ? timer.cancelCompose() : undefined"
       >
       <!-- text-primary, not text-primary-400 — see the note on TimerBar's
            clock: main.css steps light mode's --ui-primary to primary-700 so
@@ -260,23 +286,39 @@ async function toggle() {
         <span class="tnum">{{ timer.count }}</span>
       </UButton>
 
-      <span
-        v-if="chainLabel"
-        class="flex min-w-0 items-center gap-1.5 rounded-sm bg-primary/10 py-1 pr-[5px] pl-2.5 text-[11px] text-primary ring-1 ring-primary/25 ring-inset"
-      >
-        <span class="truncate">{{ chainLabel }}</span>
-        <button
-          type="button"
-          aria-label="Remove client, project or task"
-          class="relative flex size-[18px] shrink-0 items-center justify-center rounded-xs bg-primary/20 after:absolute after:-inset-3 after:content-['']"
-          @click="timer.detach()"
+      <!-- "+" leads the attachment, right beside what it attaches to — the
+           chain chip, or the "No client, project or task" it replaces. It used
+           to sit in the far corner, where it read as a generic add. -->
+      <UButton
+        icon="i-lucide-plus"
+        color="neutral"
+        variant="outline"
+        square
+        aria-label="Add client, project or task"
+        class="relative size-[30px] shrink-0 justify-center after:absolute after:-inset-1.5 after:content-['']"
+        :ui="{ leadingIcon: 'size-3.5' }"
+        @click="ui.openPicker('timer', 'task', pickerTarget())"
+      />
+
+      <!-- flex-1 so the rate badge and "Add a timer" keep their places at the
+           right whether or not anything is attached. -->
+      <div class="flex min-w-0 flex-1 items-center">
+        <span
+          v-if="chainLabel"
+          class="flex min-w-0 items-center gap-1.5 rounded-sm bg-primary/10 py-1 pr-[5px] pl-2.5 text-[11px] text-primary ring-1 ring-primary/25 ring-inset"
         >
-          <UIcon name="i-lucide-x" class="size-2.5" />
-        </button>
-      </span>
-      <!-- min-w-0 so this shrinks instead of pushing the row wide: at 390px the
-           count chip and "add a timer" now share the row with it. -->
-      <span v-else class="min-w-0 truncate text-[11px] text-muted">No client, project or task</span>
+          <span class="truncate">{{ chainLabel }}</span>
+          <button
+            type="button"
+            aria-label="Remove client, project or task"
+            class="relative flex size-[18px] shrink-0 items-center justify-center rounded-xs bg-primary/20 after:absolute after:-inset-3 after:content-['']"
+            @click="timer.detach()"
+          >
+            <UIcon name="i-lucide-x" class="size-2.5" />
+          </button>
+        </span>
+        <span v-else class="min-w-0 truncate text-[11px] text-muted">No client, project or task</span>
+      </div>
 
       <UBadge
         color="neutral"
@@ -293,31 +335,24 @@ async function toggle() {
         {{ rateLabel }}
       </UBadge>
 
+      <!-- Add a timer / Cancel new timer: the right corner. Adding is the one
+           primary control in this row — outlined, like the play button above
+           it. While composing the slot turns into a neutral ✕: cancel must not
+           be the accent, and a label that changes says more than aria-pressed
+           did. Still 30px — this row's height is what the dock's fixed 150px
+           was measured against, so prominence comes from colour, not size. -->
       <UButton
         v-if="timer.count >= 1"
-        icon="i-lucide-alarm-clock-plus"
-        :color="timer.composing ? 'primary' : 'neutral'"
+        :icon="timer.composing ? 'i-lucide-x' : 'i-lucide-alarm-clock-plus'"
+        :color="timer.composing ? 'neutral' : 'primary'"
         variant="outline"
         square
-        aria-label="Add a timer"
-        :aria-pressed="timer.composing"
+        :aria-label="timer.composing ? 'Cancel new timer' : 'Add a timer'"
         :disabled="capReached"
-        :title="addTitle"
+        :title="timer.composing ? 'Cancel new timer' : addTitle"
         class="relative ml-auto size-[30px] shrink-0 justify-center after:absolute after:-inset-1.5 after:content-['']"
-        :ui="{ leadingIcon: 'size-3.5' }"
+        :ui="{ leadingIcon: 'size-4' }"
         @click="toggleCompose"
-      />
-
-      <UButton
-        icon="i-lucide-plus"
-        color="neutral"
-        variant="outline"
-        square
-        aria-label="Add client, project or task"
-        class="relative size-[30px] shrink-0 justify-center after:absolute after:-inset-2 after:content-['']"
-        :class="timer.count >= 1 ? '' : 'ml-auto'"
-        :ui="{ leadingIcon: 'size-3.5' }"
-        @click="ui.openPicker('timer', 'task', pickerTarget())"
       />
     </div>
   </div>

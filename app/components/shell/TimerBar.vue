@@ -122,10 +122,13 @@ const rateLabel = computed(() => {
 // here kept its digits counting under a play button after "Add a timer".
 const clock = computed(() => formatClock(timer.currentElapsedSec))
 
-// ── Add a timer ────────────────────────────────────────────────────────────
-// A toggle rather than a one-way action: pressed = the bar is describing a new
-// timer, pressing again hands it back to the running one. At the cap only the
-// *entering* direction is disabled, so nobody can get stuck in the composer.
+// ── Add a timer / Cancel new timer ─────────────────────────────────────────
+// One slot, two buttons. While composing it is a ✕ labelled "Cancel new timer":
+// a pressed-looking "Add a timer" told nobody it was the way back out, and a
+// label that changes says more than aria-pressed did. Cancel discards the
+// draft and hands the bar back to the pinned (else newest) timer; Esc in the
+// field does the same. At the cap only *adding* is disabled, so nobody can get
+// stuck in the composer.
 const capReached = computed(() => timer.atCap && !timer.composing)
 
 const addTitle = computed(() =>
@@ -203,6 +206,7 @@ async function toggle() {
         @input="onNameInput"
         @change="flushName"
         @keydown.enter.prevent="toggle"
+        @keydown.esc="timer.composing && timer.count ? timer.cancelCompose() : undefined"
       >
 
       <!-- Chain chip: Task · Project · Client, one removable unit -->
@@ -252,17 +256,16 @@ async function toggle() {
         <span class="whitespace-nowrap"><span class="tnum">{{ timer.count }}</span> running</span>
       </UButton>
 
-      <!-- Add a timer (toggle: pressed = the bar is showing the draft) -->
+      <!-- Add a timer, or — while the bar is the draft — Cancel new timer -->
       <UButton
         v-if="timer.count >= 1"
-        icon="i-lucide-alarm-clock-plus"
-        :color="timer.composing ? 'primary' : 'neutral'"
+        :icon="timer.composing ? 'i-lucide-x' : 'i-lucide-alarm-clock-plus'"
+        color="neutral"
         variant="outline"
         square
-        aria-label="Add a timer"
-        :aria-pressed="timer.composing"
+        :aria-label="timer.composing ? 'Cancel new timer' : 'Add a timer'"
         :disabled="capReached"
-        :title="addTitle"
+        :title="timer.composing ? 'Cancel new timer' : addTitle"
         class="size-[34px] shrink-0 justify-center"
         @click="toggleCompose"
       />

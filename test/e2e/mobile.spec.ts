@@ -4,6 +4,7 @@ import { expect, test } from './helpers/test'
 import { stopAllTimers, createEntry, deleteEntriesNamed, listEntries } from './helpers/api'
 import {
   addTimerButton,
+  closeTimerListButton,
   bulkActionsBar,
   entryRow,
   group,
@@ -127,16 +128,30 @@ test.describe('mobile shell', { tag: '@mobile' }, () => {
     await timerToggle(page).click()
     await expect(timerToggle(page)).toHaveAccessibleName('Stop')
 
+    // Row 2's layout: "+" sits beside the thing it attaches to, and "Add a
+    // timer" holds the right corner.
+    const plusBox = (await timerPlus(page).boundingBox())!
+    const addBox = (await addTimerButton(page).boundingBox())!
+    expect(addBox.x).toBeGreaterThan(plusBox.x)
+
     await addTimerButton(page).click()
     await expect(timerToggle(page)).toHaveAccessibleName('Start')
     await timerInput(page).fill(second)
     await timerToggle(page).click()
     await expect(timerToggle(page)).toHaveAccessibleName('Stop')
 
-    // The list opened by itself when the first timer left the card.
+    // The list opened by itself when the first timer left the card…
     await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'true')
     await expect(timerListRow(page, TIMER_NAME)).toBeVisible()
     await expect(timerListRow(page, second)).toBeVisible()
+
+    // …and the overlay's own ✕ closes it, without reaching back down to the
+    // chip that opened it. The chip reopens it.
+    await closeTimerListButton(page).click()
+    await expect(timerList(page)).toBeHidden()
+    await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'false')
+    await timerCount(page).click()
+    await expect(timerListRow(page, TIMER_NAME)).toBeVisible()
 
     // Stopping one from the list leaves the other running and stays put.
     await timerListRow(page, TIMER_NAME).getByRole('button', { name: `Stop ${TIMER_NAME}`, exact: true }).click()

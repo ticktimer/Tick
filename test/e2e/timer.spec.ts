@@ -17,6 +17,7 @@ import {
 } from './helpers/api'
 import {
   addTimerButton,
+  cancelTimerButton,
   group,
   picker,
   rows,
@@ -27,6 +28,7 @@ import {
   timerInput,
   timerList,
   timerListRow,
+  timerListSelect,
   timerPlus,
   timerRowClock,
   timerToggle
@@ -167,14 +169,15 @@ test('two timers run at once; stopping one by id leaves the other running', asyn
 
   // ── "Add a timer" hands the bar to the draft without stopping anything ────
   await addTimerButton(page).click()
-  await expect(addTimerButton(page)).toHaveAttribute('aria-pressed', 'true')
+  // The slot is now the way out — a ✕ labelled "Cancel new timer".
+  await expect(cancelTimerButton(page)).toBeVisible()
   await expect(timerToggle(page)).toHaveAccessibleName('Start')
   expect((await listTimers(api)).map(t => t.name)).toEqual([NAME])
 
   await timerInput(page).fill(SECOND)
   await timerToggle(page).click()
   await expect(timerToggle(page)).toHaveAccessibleName('Stop')
-  await expect(addTimerButton(page)).toHaveAttribute('aria-pressed', 'false')
+  await expect(addTimerButton(page)).toBeVisible()
   await expect(timerCount(page)).toHaveText(/2\s*running/)
 
   // Server truth: two rows with end IS NULL, ordered start ASC.
@@ -240,12 +243,23 @@ test('"Add a timer" composes an empty draft and opens the list — nothing start
   // Nothing started server-side.
   expect((await listTimers(api)).map(t => t.name)).toEqual([NAME])
 
-  // Pressing it again hands the bar back to the running timer.
-  await addTimerButton(page).click()
-  await expect(addTimerButton(page)).toHaveAttribute('aria-pressed', 'false')
+  // ✕ hands the bar back to the running timer…
+  await timerInput(page).fill('half a thought')
+  await cancelTimerButton(page).click()
+  await expect(addTimerButton(page)).toBeVisible()
   await expect(timerInput(page)).toHaveValue(NAME)
   await expect(timerToggle(page)).toHaveAccessibleName('Stop')
   await expect(timerClock(page)).not.toHaveText('00:00:00')
+
+  // …and cancel means discard: the next "Add a timer" is blank, not "half a
+  // thought" waiting to surprise you. Esc in the field is the same cancel.
+  await addTimerButton(page).click()
+  await expect(timerInput(page)).toHaveValue('')
+  await timerInput(page).fill('another')
+  await timerInput(page).press('Escape')
+  await expect(addTimerButton(page)).toBeVisible()
+  await expect(timerInput(page)).toHaveValue(NAME)
+  expect((await listTimers(api)).map(t => t.name)).toEqual([NAME])
 })
 
 test('▶ on an entry while a timer runs adds a second one and opens the list', async ({ page, api }) => {
@@ -273,34 +287,34 @@ test('▶ on an entry while a timer runs adds a second one and opens the list', 
   await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([NAME, again])
 })
 
-test('pinning keeps a timer in the bar when a newer one starts', async ({ page, api }) => {
+test('tapping a row selects it: the selection stays in the bar when a newer one starts', async ({ page, api }) => {
   await page.goto('/time')
 
   await timerInput(page).fill(NAME)
   await timerToggle(page).click()
   await expect(timerToggle(page)).toHaveAccessibleName('Stop')
 
-  // Pin it, then start a second one.
+  // Select it (it is already the newest, so this is what makes it *stick*),
+  // then start a second one.
   await timerCount(page).click()
-  const pin = timerListRow(page, NAME).getByRole('button', { name: `Pin ${NAME} to the timer bar` })
-  await pin.click()
-  await expect(pin).toHaveAttribute('aria-pressed', 'true')
+  await timerListSelect(page, NAME).click()
+  await expect(timerListRow(page, NAME)).toHaveAttribute('aria-current', 'true')
 
   await addTimerButton(page).click()
   await timerInput(page).fill(SECOND)
   await timerToggle(page).click()
   await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([NAME, SECOND])
 
-  // The pin wins over "newest": the bar still shows the first timer, and the
-  // list marks it as the active row.
+  // The selection wins over "newest": the bar still shows the first timer,
+  // and the list marks it as the selected row.
   await expect(timerInput(page)).toHaveValue(NAME)
   await expect(timerListRow(page, NAME)).toHaveAttribute('aria-current', 'true')
   await expect(timerListRow(page, SECOND)).not.toHaveAttribute('aria-current', 'true')
 
-  // Unpinning hands the bar back to the newest.
-  await pin.click()
-  await expect(pin).toHaveAttribute('aria-pressed', 'false')
+  // Tapping the other row hands the bar to it.
+  await timerListSelect(page, SECOND).click()
   await expect(timerInput(page)).toHaveValue(SECOND)
+  await expect(timerListRow(page, SECOND)).toHaveAttribute('aria-current', 'true')
 })
 
 // ── Regressions found reviewing #37 ─────────────────────────────────────────
@@ -340,9 +354,8 @@ test('a failed re-hydrate leaves the running timers and the pin alone', async ({
   await expect(timerToggle(page)).toHaveAccessibleName('Stop')
 
   await timerCount(page).click()
-  const pin = timerListRow(page, NAME).getByRole('button', { name: `Pin ${NAME} to the timer bar` })
-  await pin.click()
-  await expect(pin).toHaveAttribute('aria-pressed', 'true')
+  await timerListSelect(page, NAME).click()
+  await expect(timerListRow(page, NAME)).toHaveAttribute('aria-current', 'true')
   expect(await page.evaluate(() => localStorage.getItem('tick-timer-pinned'))).not.toBeNull()
 
   // Every collection GET now fails at the network level — a Wi-Fi blip, not an
@@ -362,7 +375,7 @@ test('a failed re-hydrate leaves the running timers and the pin alone', async ({
     // is gone" and delete tick-timer-pinned from disk, which never recovered.
     await expect(timerCount(page)).toHaveText(/1\s*running/)
     await expect(timerListRow(page, NAME)).toBeVisible()
-    await expect(pin).toHaveAttribute('aria-pressed', 'true')
+    await expect(timerListRow(page, NAME)).toHaveAttribute('aria-current', 'true')
     expect(await page.evaluate(() => localStorage.getItem('tick-timer-pinned'))).not.toBeNull()
 
     // …and the shared interval is still running.

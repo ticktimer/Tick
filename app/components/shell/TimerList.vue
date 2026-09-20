@@ -4,10 +4,11 @@
 // in the server's order (start ASC, id ASC) and are never re-sorted on the
 // client, so a row can't jump under the finger when another timer starts.
 //
-// The row the bar is showing is *marked*, not moved: aria-current="true" for
-// screen readers, a primary ring for everyone else. That is a different fact
-// from the pin (aria-pressed on the pin button) — the bar shows the pinned
-// timer when there is one, and the newest otherwise.
+// Tapping a row selects it: the selected timer is the one the bar shows, and
+// it stays there when a newer one starts (the store calls that the pin; the
+// list never says the word). The selected row is *marked*, not moved:
+// aria-current="true" for screen readers, a primary ring for everyone else.
+// Without a selection the bar follows the newest timer, as before.
 //
 // The mark is an edge, not a fill. A bg-primary/10 wash put the row's accent
 // clock at 1.72:1 in Daylight and left the passing cases a hair over the line;
@@ -68,9 +69,14 @@ async function stopOne(t: TimerState) {
   }
 }
 
-function togglePin(t: TimerState) {
-  if (timer.pinnedId === t.entryId) timer.unpin()
-  else timer.pin(t.entryId)
+/**
+ * Tap-to-select — always a pin, even for the row already in the bar. "Already
+ * in the bar" may only mean "newest"; tapping it is what makes it *stay* there
+ * when the next timer starts. Skipping the pin in that case looked like a
+ * no-op and silently wasn't one.
+ */
+function select(t: TimerState) {
+  timer.pin(t.entryId)
 }
 </script>
 
@@ -85,38 +91,31 @@ function togglePin(t: TimerState) {
         ? 'ring-1 ring-primary/60 ring-inset'
         : 'hover:bg-[color-mix(in_srgb,var(--ui-text)_5%,transparent)]'"
     >
-      <!-- Name, chain underneath. Same dot + muted text as an entry row: ten
-           accent chips stacked down a list would out-shout the active-row
-           ring, and the bar is meant to stay the accented surface. -->
-      <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span class="truncate text-[13px] text-highlighted">{{ displayName(t) }}</span>
-        <span v-if="chainLabel(t)" class="flex min-w-0 items-center gap-1.5 text-[11px] text-muted">
-          <span class="size-[6px] shrink-0 rounded-full" :style="{ background: clientColorVar(t.ref?.clientColor) }" />
-          <span class="truncate">{{ chainLabel(t) }}</span>
+      <!-- The row's body is the select control — everything but the stop
+           button. Name with the chain underneath: the same dot + muted text as
+           an entry row, because ten accent chips stacked down a list would
+           out-shout the selected-row ring, and the bar is meant to stay the
+           accented surface. 44px tall under lg, so it is a real touch target. -->
+      <button
+        type="button"
+        :aria-label="`Show ${displayName(t)} in the timer bar`"
+        :title="timer.activeTimer?.entryId === t.entryId ? 'Shown in the timer bar' : 'Show in the timer bar'"
+        class="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-1 focus-visible:ring-primary lg:min-h-[30px]"
+        @click="select(t)"
+      >
+        <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span class="truncate text-[13px] text-highlighted">{{ displayName(t) }}</span>
+          <span v-if="chainLabel(t)" class="flex min-w-0 items-center gap-1.5 text-[11px] text-muted">
+            <span class="size-[6px] shrink-0 rounded-full" :style="{ background: clientColorVar(t.ref?.clientColor) }" />
+            <span class="truncate">{{ chainLabel(t) }}</span>
+          </span>
         </span>
-      </span>
 
-      <span
-        class="tnum shrink-0 text-[13px] font-medium tracking-[0.01em]"
-        :class="timer.activeTimer?.entryId === t.entryId ? 'text-primary dark:text-primary-300' : 'text-toned'"
-      >{{ formatClock(timer.elapsedFor(t.entryId)) }}</span>
-
-      <!-- Pin: a toggle, so the label stays constant and aria-pressed carries
-           the state (APG). Pinning keeps this row in the bar when a newer
-           timer starts. -->
-      <UButton
-        icon="i-lucide-pin"
-        color="neutral"
-        variant="ghost"
-        square
-        :aria-pressed="timer.pinnedId === t.entryId"
-        :aria-label="`Pin ${displayName(t)} to the timer bar`"
-        :title="timer.pinnedId === t.entryId ? 'Pinned to the timer bar' : 'Pin to the timer bar'"
-        class="size-11 shrink-0 justify-center lg:size-[30px]"
-        :class="timer.pinnedId === t.entryId ? 'text-primary' : 'text-dimmed hover:text-toned'"
-        :ui="{ leadingIcon: 'size-[13px]' }"
-        @click="togglePin(t)"
-      />
+        <span
+          class="tnum shrink-0 pr-1 text-[13px] font-medium tracking-[0.01em]"
+          :class="timer.activeTimer?.entryId === t.entryId ? 'text-primary dark:text-primary-300' : 'text-toned'"
+        >{{ formatClock(timer.elapsedFor(t.entryId)) }}</span>
+      </button>
 
       <UButton
         icon="i-lucide-square"

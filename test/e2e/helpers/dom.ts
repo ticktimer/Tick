@@ -34,9 +34,19 @@ export function timerCount(page: Page): Locator {
   return page.getByRole('button', { name: /running$/ }).filter({ visible: true })
 }
 
-/** The visible "Add a timer" toggle — only rendered while something runs. */
+/** The visible "Add a timer" button — only rendered while something runs. */
 export function addTimerButton(page: Page): Locator {
   return page.getByRole('button', { name: 'Add a timer' }).filter({ visible: true })
+}
+
+/** The same slot while the bar is composing: a ✕ that discards the draft. */
+export function cancelTimerButton(page: Page): Locator {
+  return page.getByRole('button', { name: 'Cancel new timer' }).filter({ visible: true })
+}
+
+/** The mobile overlay's ✕ (the desktop disclosure has none — its chip is adjacent). */
+export function closeTimerListButton(page: Page): Locator {
+  return page.getByRole('button', { name: 'Close the running timers' }).filter({ visible: true })
 }
 
 /** The visible running-timer list (desktop disclosure / mobile dock overlay). */
@@ -49,6 +59,11 @@ export function timerListRow(page: Page, name: string): Locator {
   return timerList(page).getByRole('listitem').filter({
     has: page.getByRole('button', { name: `Stop ${name}`, exact: true })
   })
+}
+
+/** A row's tap-to-select control: the selected timer is the one the bar shows. */
+export function timerListSelect(page: Page, name: string): Locator {
+  return timerListRow(page, name).getByRole('button', { name: `Show ${name} in the timer bar`, exact: true })
 }
 
 /** A running-list row's live clock. `.tnum` is the only tabular figure in a row. */

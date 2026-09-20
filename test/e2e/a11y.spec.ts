@@ -10,7 +10,7 @@ import AxeBuilder from '@axe-core/playwright'
 import type { AxeResults } from 'axe-core'
 import type { Page } from '@playwright/test'
 import { createTask, deleteTasksNamed, stopAllTimers } from './helpers/api'
-import { addTimerButton, picker, timerInput, timerList, timerPlus, timerToggle } from './helpers/dom'
+import { addTimerButton, picker, timerCount, timerInput, timerList, timerPlus, timerToggle } from './helpers/dom'
 import { uniqueName } from './helpers/fixtures'
 import { expect, test } from './helpers/test'
 
@@ -255,5 +255,23 @@ test.describe('mobile subset', { tag: '@mobile' }, () => {
     await timerPlus(page).click()
     await expect(picker(page)).toBeVisible()
     await checkA11y(page, 'picker bottom sheet (mobile)')
+  })
+
+  // The running list floats above the dock as an overlay with its own header
+  // and ✕ — a surface the desktop sweep never renders. Scanned with the dock
+  // in its running state too, since that is the only time the list exists.
+  test('running-list overlay has no violations', async ({ page, api }) => {
+    const first = uniqueName('E2E a11y mobile timer')
+    await page.goto('/time')
+    try {
+      await timerInput(page).fill(first)
+      await timerToggle(page).click()
+      await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+      await timerCount(page).click()
+      await expect(timerList(page)).toBeVisible()
+      await checkA11y(page, 'running-list overlay (mobile)')
+    } finally {
+      await stopAllTimers(api)
+    }
   })
 })
