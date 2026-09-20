@@ -144,8 +144,10 @@ export function foldList(page: Page): Locator {
 
 /**
  * Lane widths — and so whether a cluster is drawn as lanes or a fold — come
- * from the measured grid; the server render assumes Week's widest column. Any
- * assertion about block geometry waits for the measurement to have landed.
+ * from the measured grid; the server render assumes Week's widest column.
+ * The flag is set once the first measurement lands and never cleared, so this
+ * gates the first client layout only: a later Week↔Day switch re-derives the
+ * column width synchronously from the same measurement.
  */
 export async function waitForLanesMeasured(page: Page): Promise<void> {
   await page.locator('[data-lanes-measured]').waitFor()

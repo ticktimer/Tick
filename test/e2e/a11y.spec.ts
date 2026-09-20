@@ -9,7 +9,7 @@
 import AxeBuilder from '@axe-core/playwright'
 import type { AxeResults } from 'axe-core'
 import type { Page } from '@playwright/test'
-import { createEntry, createTask, deleteEntriesNamed, deleteTasksNamed, stopAllTimers } from './helpers/api'
+import { createEntry, createTask, deleteEntriesNamed, deleteTasksNamed, parkTodaysEntries, restoreParked, stopAllTimers } from './helpers/api'
 import { addTimerButton, calendarFold, foldList, picker, timerCount, timerInput, timerList, timerPlus, timerToggle, waitForLanesMeasured } from './helpers/dom'
 import { uniqueName } from './helpers/fixtures'
 import { expect, test } from './helpers/test'
@@ -151,6 +151,38 @@ for (const preset of ['Nocturne', 'Daylight'] as const) {
         await checkA11y(page, `calendar fold list (${preset})`)
       } finally {
         await deleteEntriesNamed(api, a, b)
+      }
+    })
+
+    // The running branch of the fold and its list — primary-named member on
+    // the face, aria-current + ring, live clock, the aria-hidden spacer — is
+    // markup the ended-only case never renders. Built around now, since a
+    // running timer is now; the entry spans the half hour either side of it.
+    test(`a fold with a running timer in it has no violations (${preset})`, async ({ page, api }) => {
+      const live = uniqueName('E2E a11y fold live')
+      const ended = uniqueName('E2E a11y fold ended')
+      await applyPreset(page, preset)
+      // Parked so the seed's today rows can't join the fold at whatever hour this runs.
+      const parked = await parkTodaysEntries(api)
+      try {
+        const now = Date.now()
+        const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0)
+        const dayEnd = dayStart.getTime() + 24 * 3600_000 - 60_000
+        const clamp = (t: number) => new Date(Math.min(dayEnd, Math.max(dayStart.getTime(), t))).toISOString()
+        await createEntry(api, { name: ended, billable: true, start: clamp(now - 30 * 60_000), end: clamp(now + 30 * 60_000) })
+        expect((await api.post('/api/timers', { data: { name: live } })).ok()).toBe(true)
+        await page.goto('/calendar')
+        await waitForLanesMeasured(page)
+        const fold = calendarFold(page, ended, live)
+        await expect(fold).toBeVisible()
+        await checkA11y(page, `calendar fold face, running member (${preset})`)
+        await fold.click()
+        await expect(foldList(page)).toBeVisible()
+        await checkA11y(page, `calendar fold list, running member (${preset})`)
+      } finally {
+        await stopAllTimers(api)
+        await deleteEntriesNamed(api, live, ended)
+        await restoreParked(api, parked)
       }
     })
   })
@@ -295,8 +327,8 @@ test.describe('mobile subset', { tag: '@mobile' }, () => {
     test(`calendar fold and its list have no violations (${preset})`, async ({ page, api }) => {
       // Four in one hour: a 294px column keeps three ~94px lanes but not four.
       const names = [0, 20, 40, 50].map(m => uniqueName(`E2E a11y mobile fold ${m}`))
-      await applyPreset(page, preset)
       try {
+        await applyPreset(page, preset)
         for (const [i, n] of names.entries()) {
           await createEntry(api, { name: n, billable: true, ...entryAt(4, [0, 20, 40, 50][i]!) })
         }
@@ -309,8 +341,14 @@ test.describe('mobile subset', { tag: '@mobile' }, () => {
         await expect(foldList(page)).toBeVisible()
         await checkA11y(page, `calendar fold list (mobile, ${preset})`)
       } finally {
-        await deleteEntriesNamed(api, ...names)
-        if (preset !== 'Nocturne') await applyPreset(page, 'Nocturne')
+        // The preset persists server-side (users.theme) into every later spec
+        // on this worker, so it is restored whatever else failed — and before
+        // the row cleanup, which can itself throw.
+        try {
+          if (preset !== 'Nocturne') await applyPreset(page, 'Nocturne')
+        } finally {
+          await deleteEntriesNamed(api, ...names)
+        }
       }
     })
   }

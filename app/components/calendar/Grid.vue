@@ -677,19 +677,40 @@ function foldMemberOf(it: LaneItem): { id: string, startTs: number, endTs: numbe
   }
 }
 
-/** One fold for a cluster: members in start order (id breaks ties), the cluster's envelope as its range. */
-function foldOf(id: string, dayIdx: number, span: { top: number, h: number }, items: LaneItem[]): Fold {
+/**
+ * An item's span in minutes of its day — what "overlap" means, independent of
+ * the 22px floor a drawn block gets. A running timer ends at now.
+ */
+function timeSpanOf(it: LaneItem, dayTs: number): { top: number, h: number } {
+  const startTs = 'entry' in it ? new Date(it.entry.start).getTime() : new Date(it.timer.start).getTime()
+  const endTs = 'entry' in it ? startTs + it.entry.durationSec * 1000 : now.value
+  const top = (startTs - dayTs) / 60_000
+  return { top, h: Math.max(1 / 60, Math.min(1440, (endTs - dayTs) / 60_000) - top) }
+}
+
+/**
+ * One fold for a cluster: members in start order (id breaks ties), the drawn
+ * envelope of its blocks as its box, the cluster's time span as its range.
+ * Its id is the first member's, not the cluster's position: clusters are
+ * numbered by position, and a running block growing into an earlier cluster
+ * renumbers the later ones — an open list keyed by position would silently
+ * become another cluster's list. Keyed by member, it stays on its own cluster,
+ * and closes only if an earlier member arrives.
+ */
+function foldOf(dayTs: number, dayIdx: number, items: LaneItem[]): Fold {
   const sorted = items
     .map(foldMemberOf)
     .sort((a, b) => a.startTs - b.startTs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   const running = sorted.filter(m => m.member.kind === 'timer').length
   const firstStart = sorted[0]!.startTs
   const lastEnd = Math.max(...sorted.map(m => m.endTs))
+  const top = Math.min(...items.map(it => it.top))
+  const bottom = Math.max(...items.map(it => it.top + it.h))
   return {
-    id,
+    id: `${dayTs}:${sorted[0]!.id}`,
     dayIdx,
-    top: span.top,
-    h: Math.max(22, span.h),
+    top,
+    h: Math.max(22, bottom - top),
     members: sorted.map(m => m.member),
     count: sorted.length,
     running,
@@ -707,17 +728,24 @@ const dayLayout = computed<DayLayout[]>(() => calendar.days.map((dayTs, di) => {
     ...(dayBlocks.value[di] ?? []).filter(b => !b.dragging),
     ...runningBlocks.value.filter(b => b.dayIdx === di)
   ]
-  const lanes = assignLanes(items)
+  // Overlap is decided in TIME, never in drawn pixels: heightOf() clamps every
+  // block to 22px, which is 27.5 minutes at 48px an hour, so a 9:00–9:15 and a
+  // 9:25–10:00 overlap on screen without ever overlapping in time. Clustering
+  // on the drawn geometry folded exactly those in Week view — and a folded
+  // entry cannot be dragged or resized. Short neighbours still overlap by a
+  // few pixels, as they did before any of this; they stay two blocks.
+  const spans = items.map(it => timeSpanOf(it, dayTs))
+  const lanes = assignLanes(spans)
   const laneById = new Map<string, Lane>()
   items.forEach((it, k) => laneById.set(it.id, lanes[k]!))
   const hidden = new Set<string>()
   const folds: Fold[] = []
-  for (const span of clusterSpans(items, lanes)) {
+  for (const span of clusterSpans(spans, lanes)) {
     const laneW = (colPx.value - COL_PAD * 2) / span.lanes - LANE_GAP
     if (span.lanes < 2 || laneW >= MIN_LANE_PX) continue
     const members = span.members.map(k => items[k]!)
     for (const it of members) hidden.add(it.id)
-    folds.push(foldOf(`${dayTs}:${span.cluster}`, di, span, members))
+    folds.push(foldOf(dayTs, di, members))
   }
   return { laneById, hidden, folds }
 }))
@@ -807,9 +835,12 @@ function setOpenFold(id: string, open: boolean) {
 }
 
 /** A press anywhere on the grid but a fold's own face closes the open list.
- *  Block presses stop propagating (so reka's document-level outside-press
- *  detection never sees them), and neither a drag nor an edit should run under
- *  an open popover. The faces are left to reka, which toggles them. */
+ *  Block presses stop propagating, so reka's document-level outside-press
+ *  detection never sees them — this capture-phase hook does the closing. The
+ *  press then does its own job as well (a ▶ starts, a block edits, empty space
+ *  seeds a ghost): the list is non-modal and that is how a popover behaves
+ *  everywhere; it is simply gone before the action lands. The faces are left
+ *  to reka, which toggles them. */
 function onGridDown(e: PointerEvent) {
   if (openFold.value && !(e.target as Element | null)?.closest('[data-fold]')) openFold.value = null
 }
@@ -845,8 +876,22 @@ watch(() => ui.editEntry, async (open, was) => {
   const el = foldOpener
   foldOpener = null
   await nextTick()
-  el.focus()
+  if (el.isConnected) el.focus()
+  else document.getElementById('main')?.focus()
 })
+
+// A focused fold can also vanish AFTER that: delete from its row and the
+// dialog closes first, the range refetches second, and only then does the
+// cluster stop folding and the button unmount — with focus on it, which
+// drops to <body>. Pre-flush, so the button is still the active element
+// when its id is already gone from the layout; <main> is the same landing
+// the picker uses.
+const foldIds = computed(() => new Set(dayLayout.value.flatMap(d => d.folds.map(f => f.id))))
+watch(foldIds, (ids) => {
+  const active = document.activeElement as HTMLElement | null
+  const id = active?.dataset?.fold
+  if (id && !ids.has(id)) document.getElementById('main')?.focus()
+}, { flush: 'pre' })
 
 /** Name rows the face can hold: py-1 leaves h − 8, one 14px row each. */
 function foldRows(f: Fold): number {
@@ -872,16 +917,23 @@ function foldTitle(f: Fold): string {
 }
 
 /**
- * Coarse pointers: 44px hit areas without changing what is drawn — a pseudo-
- * element grown past the box (MobileTimerCard's idiom). The face ▶ is 18 or
- * 22px (±13 / ±11; on a 22px block it spills ≤11px onto a back-to-back
- * neighbour's corner, the trade the armed handles already make); a fold under
- * 44px tall grows vertically. Static, double-quoted strings so Tailwind's
- * scanner sees content-[''] exactly as written.
+ * Coarse pointers: a bigger hit area on the face ▶ without changing what is
+ * drawn — a pseudo-element grown past the box (MobileTimerCard's idiom). 44px
+ * wide, grown inward over the padding the block reserves for it; only 6px
+ * taller each way, because two back-to-back 30-minute blocks put their ▶s
+ * 6px apart and a taller ring resolves the bottom of one ▶ to the OTHER
+ * block's — starting the wrong timer is worse than a 30px-tall target (WCAG
+ * 2.5.8 wants 24). The fold face gets no band at all: it is already full
+ * column width, and a band past its 22px box took taps from a fold sitting
+ * directly under it. Static, double-quoted strings so Tailwind's scanner sees
+ * content-[''] exactly as written.
  */
-const PLAY_HIT_18 = "after:absolute after:-inset-[13px] after:content-['']"
-const PLAY_HIT_22 = "after:absolute after:-inset-[11px] after:content-['']"
-const FOLD_HIT = "before:absolute before:inset-x-0 before:top-1/2 before:h-11 before:-translate-y-1/2 before:content-['']"
+// Sideways the ring grows INWARD only, over the 28px the block already reserves
+// for its ▶ (pr-7) — never past the column's right edge, where the neighbouring
+// day column has no stacking context of its own and a z-20 ring would have
+// turned the first few pixels of Tuesday into "start Monday's entry".
+const PLAY_HIT_18 = "after:absolute after:-inset-y-[6px] after:-left-[26px] after:right-0 after:content-['']"
+const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] after:right-0 after:content-['']"
 </script>
 
 <template>
@@ -955,6 +1007,74 @@ const FOLD_HIT = "before:absolute before:inset-x-0 before:top-1/2 before:h-11 be
             class="pointer-events-none absolute inset-x-0 h-px"
             :style="{ top: h.top + 'px', background: 'color-mix(in srgb, var(--ui-text) 5%, transparent)' }"
           />
+
+          <!-- Folds: a cluster too narrow for lanes, drawn as one block that
+               lists its members by name; the click discloses them, each with
+               its own ▶ (there is none on the face — nothing here is legible
+               enough to restart by). pointerdown is swallowed like the ▶'s,
+               so a press never seeds a create ghost or a move; reka's trigger
+               toggles on click and supplies aria-haspopup/expanded/controls.
+               Rendered before the entry blocks: where the 22px floor makes a
+               short block and a fold touch, the block paints (and hit-tests)
+               on top, as blocks already do to each other. -->
+          <UPopover
+            v-for="f in foldsOf(di)"
+            :key="f.id"
+            :open="openFold === f.id"
+            :content="foldContent"
+            :ui="{ content: 'w-[min(100vw-24px,360px)] p-1' }"
+            @update:open="setOpenFold(f.id, $event)"
+          >
+            <button
+              type="button"
+              :data-fold="f.id"
+              :title="foldTitle(f)"
+              :aria-label="foldLabel(f, d)"
+              class="tick-rise absolute flex cursor-pointer flex-col gap-0 rounded-sm py-1 pl-1.5 pr-1.5 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
+              :style="{
+                top: f.top + 'px',
+                height: f.h + 'px',
+                left: COL_PAD + 'px',
+                right: COL_PAD + 'px',
+                background: blockBg(f.billable),
+                borderLeft: `2px solid ${f.running ? 'var(--ui-primary)' : blockEdge(f.billable)}`,
+                boxShadow: f.running ? '0 0 8px color-mix(in srgb, var(--ui-primary) 45%, transparent)' : undefined
+              }"
+              @pointerdown.stop
+            >
+              <!-- A running member is marked by its dot (primary, in place of the
+                   client colour — non-text, ≥3:1 on the tint) and by the fold's
+                   own live edge and glow — never by accent TEXT: text-primary on
+                   blockBg measures 4.05:1 in Nocturne and 4.29 in Daylight, under
+                   AA for 11px. Same rule as the chain chip (#39): the tint is
+                   what breaks it, not the shade. -->
+              <span
+                v-for="(m, i) in f.members.slice(0, foldShown(f))"
+                :key="memberKey(m)"
+                class="flex h-[14px] items-center gap-1.5"
+              >
+                <span
+                  class="size-[6px] shrink-0 rounded-full"
+                  :class="m.kind === 'timer' ? 'bg-primary' : ''"
+                  :style="m.kind === 'timer' ? undefined : { background: clientColorVar(m.clientColor) }"
+                />
+                <span class="min-w-0 truncate text-[11px] font-medium leading-[14px] text-highlighted">{{ m.name }}</span>
+                <span
+                  v-if="i === foldShown(f) - 1 && f.count > foldShown(f)"
+                  class="tnum shrink-0 text-[10px] text-toned"
+                >+{{ f.count - foldShown(f) }}</span>
+              </span>
+            </button>
+            <template #content>
+              <CalendarClusterList
+                :fold="f"
+                :day-label="`${d.wd} ${d.num}`"
+                @edit="onFoldEdit"
+                @start="onFoldStart"
+                @show="onFoldShow"
+              />
+            </template>
+          </UPopover>
 
           <!-- Entry blocks (a folded member is drawn by its fold instead) -->
           <template v-for="b in drawnBlocks(di)" :key="b.id">
@@ -1047,67 +1167,11 @@ const FOLD_HIT = "before:absolute before:inset-x-0 before:top-1/2 before:h-11 be
             }"
           >
             <span class="truncate text-[11px] font-medium leading-[1.25] text-highlighted">{{ rb.name }}</span>
-            <span class="tnum truncate text-[10px] text-primary">{{ rb.sub }}</span>
+            <!-- text-toned, not text-primary: on blockBg the accent measures
+                 4.05:1 (Nocturne) / 4.29 (Daylight); the edge and glow already
+                 say "live". Shipped unswept since the single-timer days. -->
+            <span class="tnum truncate text-[10px] text-toned">{{ rb.sub }}</span>
           </div>
-
-          <!-- Folds: a cluster too narrow for lanes, drawn as one block that
-               lists its members by name; the click discloses them, each with
-               its own ▶ (there is none on the face — nothing here is legible
-               enough to restart by). pointerdown is swallowed like the ▶'s,
-               so a press never seeds a create ghost or a move; reka's trigger
-               toggles on click and supplies aria-haspopup/expanded/controls. -->
-          <UPopover
-            v-for="f in foldsOf(di)"
-            :key="f.id"
-            :open="openFold === f.id"
-            :content="foldContent"
-            :ui="{ content: 'w-[min(100vw-24px,360px)] p-1' }"
-            @update:open="setOpenFold(f.id, $event)"
-          >
-            <button
-              type="button"
-              :data-fold="f.id"
-              :title="foldTitle(f)"
-              :aria-label="foldLabel(f, d)"
-              class="tick-rise absolute flex cursor-pointer flex-col gap-0 rounded-sm py-1 pl-1.5 pr-1.5 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
-              :class="isCoarse && f.h < 44 ? FOLD_HIT : ''"
-              :style="{
-                top: f.top + 'px',
-                height: f.h + 'px',
-                left: COL_PAD + 'px',
-                right: COL_PAD + 'px',
-                background: blockBg(f.billable),
-                borderLeft: `2px solid ${f.running ? 'var(--ui-primary)' : blockEdge(f.billable)}`,
-                boxShadow: f.running ? '0 0 8px color-mix(in srgb, var(--ui-primary) 45%, transparent)' : undefined
-              }"
-              @pointerdown.stop
-            >
-              <span
-                v-for="(m, i) in f.members.slice(0, foldShown(f))"
-                :key="memberKey(m)"
-                class="flex h-[14px] items-center gap-1.5"
-              >
-                <span class="size-[6px] shrink-0 rounded-full" :style="{ background: clientColorVar(m.clientColor) }" />
-                <span
-                  class="min-w-0 truncate text-[11px] font-medium leading-[14px]"
-                  :class="m.kind === 'timer' ? 'text-primary' : 'text-highlighted'"
-                >{{ m.name }}</span>
-                <span
-                  v-if="i === foldShown(f) - 1 && f.count > foldShown(f)"
-                  class="tnum shrink-0 text-[10px] text-toned"
-                >+{{ f.count - foldShown(f) }}</span>
-              </span>
-            </button>
-            <template #content>
-              <CalendarClusterList
-                :fold="f"
-                :day-label="`${d.wd} ${d.num}`"
-                @edit="onFoldEdit"
-                @start="onFoldStart"
-                @show="onFoldShow"
-              />
-            </template>
-          </UPopover>
 
           <!-- Drag-to-create ghost -->
           <div

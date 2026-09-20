@@ -87,6 +87,16 @@ describe('assignLanes', () => {
 })
 
 describe('clusterSpans', () => {
+  it('spans a member wholly inside another by the outer one, not the last one', () => {
+    // 0–120 contains 30–40: the envelope is the outer block's, and the
+    // naive "top of the first to bottom of the last" would have been 0–40.
+    const items = [span(0, 120), span(30, 10)]
+    const spans = clusterSpans(items, assignLanes(items))
+    expect(spans).toHaveLength(1)
+    expect(spans[0]).toMatchObject({ lanes: 2, top: 0, h: 120, members: [0, 1] })
+  })
+
+
   it('makes a lone block its own cluster', () => {
     expect(spansOf([span(0, 60)])).toEqual([
       { cluster: 0, lanes: 1, top: 0, h: 60, members: [0] }

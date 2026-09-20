@@ -72,7 +72,7 @@ function start(m: FoldMember) {
         :aria-current="isActive(m) ? 'true' : undefined"
         class="flex items-center gap-2 rounded-md py-1.5 pr-1 pl-2.5"
         :class="isActive(m)
-          ? 'ring-1 ring-primary/60 ring-inset'
+          ? 'ring-1 ring-primary ring-inset'
           : 'hover:bg-[color-mix(in_srgb,var(--ui-text)_5%,transparent)]'"
       >
         <!-- The row's body: everything but the trailing control. Ended → the
@@ -83,7 +83,7 @@ function start(m: FoldMember) {
           type="button"
           :aria-label="bodyLabel(m)"
           :title="m.kind === 'entry' ? 'Edit entry' : (isActive(m) ? 'Shown in the timer bar' : 'Show in the timer bar')"
-          class="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-1 focus-visible:ring-primary lg:min-h-[30px]"
+          class="flex min-h-[30px] min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-1 focus-visible:ring-primary pointer-coarse:min-h-11"
           @click="press(m)"
         >
           <span class="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -114,13 +114,13 @@ function start(m: FoldMember) {
           :loading="starting === m.entry.id"
           :aria-label="`Start timer for ${m.name}`"
           :title="`Start timer for ${m.name}`"
-          class="size-11 shrink-0 justify-center rounded-full lg:size-[30px]"
+          class="size-[30px] shrink-0 justify-center rounded-full pointer-coarse:size-11"
           :ui="{ leadingIcon: 'size-[13px]' }"
           @click="start(m)"
         />
         <span
           v-else
-          class="grid size-11 shrink-0 place-items-center lg:size-[30px]"
+          class="grid size-[30px] shrink-0 place-items-center pointer-coarse:size-11"
           title="Running"
           aria-hidden="true"
         >

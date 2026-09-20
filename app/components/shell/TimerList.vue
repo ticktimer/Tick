@@ -18,6 +18,11 @@
 //
 // Every clock here reads the store's single shared `nowMs`. Ten rows are ten
 // derived values, not ten intervals.
+//
+// Row and button sizes key on the POINTER (pointer-coarse:), not the lg
+// breakpoint: an iPad in landscape is 1024px+ and touch, and keyed on width it
+// got 30px targets — in the calendar's fold list, the only place a folded
+// entry can be restarted. CalendarClusterList copies this recipe.
 import type { TimerState } from '#shared/types'
 
 defineProps<{
@@ -88,7 +93,7 @@ function select(t: TimerState) {
       :aria-current="timer.activeTimer?.entryId === t.entryId ? 'true' : undefined"
       class="flex items-center gap-2 rounded-md py-1.5 pr-1 pl-2.5"
       :class="timer.activeTimer?.entryId === t.entryId
-        ? 'ring-1 ring-primary/60 ring-inset'
+        ? 'ring-1 ring-primary ring-inset'
         : 'hover:bg-[color-mix(in_srgb,var(--ui-text)_5%,transparent)]'"
     >
       <!-- The row's body is the select control — everything but the stop
@@ -100,7 +105,7 @@ function select(t: TimerState) {
         type="button"
         :aria-label="`Show ${displayName(t)} in the timer bar`"
         :title="timer.activeTimer?.entryId === t.entryId ? 'Shown in the timer bar' : 'Show in the timer bar'"
-        class="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-1 focus-visible:ring-primary lg:min-h-[30px]"
+        class="flex min-h-[30px] min-w-0 flex-1 items-center gap-2 rounded-sm text-left outline-none focus-visible:ring-1 focus-visible:ring-primary pointer-coarse:min-h-11"
         @click="select(t)"
       >
         <span class="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -125,7 +130,7 @@ function select(t: TimerState) {
         :loading="stopping === t.entryId"
         :aria-label="`Stop ${displayName(t)}`"
         :title="`Stop ${displayName(t)}`"
-        class="size-11 shrink-0 justify-center rounded-full lg:size-[30px]"
+        class="size-[30px] shrink-0 justify-center rounded-full pointer-coarse:size-11"
         :ui="{ leadingIcon: 'size-[13px]' }"
         @click="stopOne(t)"
       />

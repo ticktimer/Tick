@@ -117,6 +117,26 @@ export async function stopAllTimers(request: APIRequestContext): Promise<void> {
   }
 }
 
+/**
+ * Trashes every entry dated today for the duration of a test and hands back
+ * what to restore. A fixture built around "now" — a running timer is now by
+ * definition — would otherwise share the column with whichever seeded row the
+ * hour of the run happens to overlap, and fold with it. timer.spec parks the
+ * same rows for the same reason.
+ */
+export async function parkTodaysEntries(request: APIRequestContext): Promise<DeleteResult[]> {
+  const parked: DeleteResult[] = []
+  for (const e of await listEntries(request, todayRange())) {
+    const result = await deleteEntry(request, e.id)
+    if (result) parked.push(result)
+  }
+  return parked
+}
+
+export async function restoreParked(request: APIRequestContext, parked: DeleteResult[]): Promise<void> {
+  for (const result of parked) await restoreDeleted(request, result)
+}
+
 /** Catalog lookup by name, e.g. the project a spec wants to attach. */
 export async function findProject(request: APIRequestContext, name: string): Promise<{ id: string }> {
   const res = await request.get('/api/projects')

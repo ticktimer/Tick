@@ -1,8 +1,8 @@
 // /calendar week grid: seeded blocks render, clicking a block edits it (and
 // must NOT start tracking), the block's play button is the only thing that does.
 import { expect, test } from './helpers/test'
-import { stopAllTimers, createEntry, deleteEntriesNamed, listEntries, listTimers, todayRange } from './helpers/api'
-import { calendarBlock, calendarFold, foldList, timerInput, timerToggle, waitForLanesMeasured } from './helpers/dom'
+import { stopAllTimers, createEntry, deleteEntriesNamed, listEntries, listTimers, parkTodaysEntries, restoreParked, todayRange } from './helpers/api'
+import { calendarBlock, calendarFold, foldList, timerCount, timerInput, timerToggle, waitForLanesMeasured } from './helpers/dom'
 import { SEED, startsWith, uniqueName } from './helpers/fixtures'
 
 /** Our own block: 3–5pm today, clear of the seeded 9:05/11:30/13:00 blocks. */
@@ -20,9 +20,22 @@ function todaySlot(fromHour: number, toHour: number) {
   return { start: start.toISOString(), end: end.toISOString() }
 }
 
-/** A calendar block, addressed by the entry name it opens with. */
+/** A drawn calendar block, addressed by the entry name its label leads with.
+ *  Anchored on the " · " after the name (see calendarBlock): a bare ^name
+ *  would also match a fold whose FIRST member has that name. */
 function block(page: import('@playwright/test').Page, name: string) {
-  return page.getByRole('button', { name: startsWith(name) }).first()
+  return calendarBlock(page, name).first()
+}
+
+/** Today, clamped: `now` shifted by `minutes`, never leaving today's column. */
+function todayClamped(minutes: number): Date {
+  const now = new Date()
+  const dayStart = new Date(now)
+  dayStart.setHours(0, 0, 0, 0)
+  const dayEnd = new Date(dayStart)
+  dayEnd.setDate(dayEnd.getDate() + 1)
+  const t = now.getTime() + minutes * 60_000
+  return new Date(Math.min(dayEnd.getTime() - 60_000, Math.max(dayStart.getTime(), t)))
 }
 
 /**
@@ -232,8 +245,9 @@ test('in Week view, overlapping entries fold into one block whose list has a ▶
   await play.click()
   running.push(OVERLAP)
   await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([OVERLAP])
-  // One disclosure at a time: the store opens the bar's running list on a
-  // start while something runs, so the fold's list closes.
+  // The grid closes the fold's list as it starts. (Nothing else was running
+  // here, so the bar's own list stays shut — the running-member case below is
+  // where one disclosure hands over to the other.)
   await expect(list).toBeHidden()
 })
 
@@ -260,7 +274,7 @@ test("a fold's row opens that entry's edit dialog without starting anything", as
 })
 
 // ── Cursor affordances on desktop ───────────────────────────────────────────
-test('a block shows the resize arrows on its edges and the grab hand on its body', async ({ page }) => {
+test('a block shows the resize arrows on its edges and the grab hand on its body', async ({ page, api }) => {
   await page.goto('/calendar')
   await waitForLanesMeasured(page)
   const target = block(page, BLOCK)
@@ -282,6 +296,15 @@ test('a block shows the resize arrows on its edges and the grab hand on its body
   expect(await cursorAt(x, box.y + 2)).toBe('ns-resize')
   expect(await cursorAt(x, box.y + box.height - 2)).toBe('ns-resize')
   expect(await cursorAt(x, box.y + box.height / 2)).toBe('grab')
+
+  // A fold opens, it does not drag: the pointing hand, everywhere on its face.
+  await createEntry(api, { name: OVERLAP, billable: true, ...todaySlot(16, 18) })
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+  const fold = calendarFold(page, BLOCK, OVERLAP)
+  const fbox = (await fold.boundingBox())!
+  expect(await cursorAt(fbox.x + 12, fbox.y + 3)).toBe('pointer')
+  expect(await cursorAt(fbox.x + 12, fbox.y + fbox.height / 2)).toBe('pointer')
 })
 
 test('dragging the top edge resizes the entry — the press lands on the edge zone', async ({ page, api }) => {
@@ -299,6 +322,15 @@ test('dragging the top edge resizes the entry — the press lands on the edge zo
   await page.mouse.move(x, box.y + 2)
   await page.mouse.down()
   await page.mouse.move(x, box.y + 2 - 48, { steps: 8 })
+  // Mid-drag the block under the pointer is the preview, and it shows the
+  // arrows for a resize — not the closed hand a move gets. Probed 10px into
+  // the preview: its top snaps to 2:05pm, 44px up, while the pointer sits
+  // 46px up — 2px above the preview, over whatever block is there (the
+  // seeded 1:00–2:45pm one), which is not what this is asking about.
+  expect(await page.evaluate(([px, py]) => {
+    const el = document.elementFromPoint(px, py)
+    return el ? getComputedStyle(el).cursor : null
+  }, [x, box.y + 2 - 48 + 10])).toBe('ns-resize')
   await page.mouse.up()
 
   // The start follows the pointer, snapped to five minutes; the end is
@@ -315,4 +347,160 @@ test('dragging the top edge resizes the entry — the press lands on the edge zo
   }).toEqual([14, 5, 17, 0])
   // …and no edit dialog opened on the way: a drag is not a click.
   await expect(page.getByRole('heading', { name: 'Edit entry' })).toHaveCount(0)
+})
+
+test('in Week view, short entries that touch on screen but not in time stay two blocks', async ({ page, api }) => {
+  // 4:00–4:15 and 4:25–5:00: a ten-minute gap, no overlap in time. On the grid a
+  // 15-minute entry is drawn at the 22px minimum — 27.5 minutes tall — so the
+  // two overlap by a few pixels. Clustering ever ran on those pixels, both
+  // entries vanished into a fold and lost drag and resize. Overlap is time.
+  const a = uniqueName('E2E short A')
+  const b = uniqueName('E2E short B')
+  running.push(a, b)
+  const at = (h: number, m: number, mins: number) => {
+    const start = new Date()
+    start.setHours(h, m, 0, 0)
+    return { start: start.toISOString(), end: new Date(start.getTime() + mins * 60_000).toISOString() }
+  }
+  await createEntry(api, { name: a, billable: true, ...at(4, 0, 15) })
+  await createEntry(api, { name: b, billable: true, ...at(4, 25, 35) })
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+
+  await expect(calendarBlock(page, a)).toBeVisible()
+  await expect(calendarBlock(page, b)).toBeVisible()
+  await expect(calendarFold(page, a, b)).toHaveCount(0)
+  // Both still carry their own ▶ — nothing about them changed.
+  await expect(page.getByRole('button', { name: `Start timer for ${a}` })).toBeVisible()
+  await expect(page.getByRole('button', { name: `Start timer for ${b}` })).toBeVisible()
+})
+
+test('a running timer folds with the entry it overlaps: its row selects, the other row restarts, and the bar\'s list takes over', async ({ page, api }) => {
+  // Built around now, because a running timer IS now: the ended entry spans
+  // the half hour either side of it, clamped to today, so the two overlap in
+  // time at any hour of the run.
+  const live = uniqueName('E2E fold live')
+  const ended = uniqueName('E2E fold ended')
+  running.push(live, ended)
+  // Today's seeded rows are parked: at 2pm the fixture would share the hour
+  // with the seed's 1:00–2:45pm entry and the fold would have three members.
+  const parked = await parkTodaysEntries(api)
+  try {
+  await createEntry(api, { name: ended, billable: true, start: todayClamped(-30).toISOString(), end: todayClamped(30).toISOString() })
+  const started = await api.post('/api/timers', { data: { name: live } })
+  expect(started.ok(), `POST /api/timers → ${started.status()}`).toBe(true)
+
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+
+  // One fold, the ended entry first (it started earlier), the timer counted.
+  const fold = calendarFold(page, ended, live)
+  await expect(fold).toBeVisible()
+  await expect(fold).toHaveAccessibleName(/· 1 running ·/)
+  await expect(fold).toContainText(live)
+
+  await fold.click()
+  const list = foldList(page)
+  await expect(list).toBeVisible()
+  const liveRow = list.getByRole('listitem').filter({
+    has: page.getByRole('button', { name: `Show ${live} in the timer bar`, exact: true })
+  })
+  // The running member: the bar's active timer, so marked; a live clock; no ▶.
+  await expect(liveRow).toHaveAttribute('aria-current', 'true')
+  await expect(list.getByRole('button', { name: `Start timer for ${live}` })).toHaveCount(0)
+  await expect(list.getByRole('button', { name: `Start timer for ${ended}`, exact: true })).toBeVisible()
+  const before = await liveRow.locator('.tnum').last().innerText()
+  await expect.poll(() => liveRow.locator('.tnum').last().innerText(), { timeout: 15_000 }).not.toBe(before)
+
+  // Its body selects it into the bar and shows the bar's list — a TimerList row tap.
+  await liveRow.getByRole('button', { name: `Show ${live} in the timer bar`, exact: true }).click()
+  await expect(list).toBeHidden()
+  await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'true')
+  await expect(timerInput(page)).toHaveValue(live)
+  await timerCount(page).click()
+  await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'false')
+
+  // The ended row's ▶ starts a second timer. Something was already running,
+  // so this start bumps a timer out of the bar and the STORE opens the bar's
+  // running list — the fold's list yields to it: one disclosure at a time.
+  await fold.click()
+  await expect(list).toBeVisible()
+  await list.getByRole('button', { name: `Start timer for ${ended}`, exact: true }).click()
+  await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([live, ended])
+  await expect(list).toBeHidden()
+  await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'true')
+  } finally {
+    await stopAllTimers(api)
+    await restoreParked(api, parked)
+  }
+})
+
+test('a fold too short for all its names shows the first and +N', async ({ page, api }) => {
+  // 4:00–4:20 and 4:10–4:30: a 30-minute envelope is 24px — room for one
+  // 14px name row, so the face reads "A +1" and the hover detail names both.
+  const a = uniqueName('E2E fold plus A')
+  const b = uniqueName('E2E fold plus B')
+  running.push(a, b)
+  const at = (h: number, m: number, mins: number) => {
+    const start = new Date()
+    start.setHours(h, m, 0, 0)
+    return { start: start.toISOString(), end: new Date(start.getTime() + mins * 60_000).toISOString() }
+  }
+  await createEntry(api, { name: a, billable: true, ...at(4, 0, 20) })
+  await createEntry(api, { name: b, billable: true, ...at(4, 10, 20) })
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+
+  const fold = calendarFold(page, a, b)
+  await expect(fold).toBeVisible()
+  await expect(fold).toContainText(a)
+  await expect(fold).toContainText('+1')
+  await expect(fold).not.toContainText(b)
+  await expect(fold).toHaveAttribute('title', `${a} · 4:00am – 4:20am\n${b} · 4:10am – 4:30am`)
+})
+
+test('in Day view at 1440, ten overlapping entries all keep lanes with a ▶ each', async ({ page, api }) => {
+  // The argument MAX_RUNNING_TIMERS stays at 10 rests on this: a 1440 day
+  // column is ~1100px, ten lanes are ~108px, above the 80px floor.
+  const names = Array.from({ length: 10 }, (_, i) => uniqueName(`E2E lane ${i}`))
+  running.push(...names)
+  for (const [i, n] of names.entries()) {
+    const start = new Date()
+    start.setHours(6, i * 2, 0, 0)
+    await createEntry(api, { name: n, billable: i % 2 === 0, start: start.toISOString(), end: new Date(start.getTime() + 60 * 60_000).toISOString() })
+  }
+  await page.goto('/calendar')
+  await openDayView(page)
+
+  for (const n of names) {
+    await expect(calendarBlock(page, n)).toBeVisible()
+    await expect(page.getByRole('button', { name: `Start timer for ${n}`, exact: true })).toBeVisible()
+  }
+  await expect(page.getByRole('button', { name: /· 10 entries/ })).toHaveCount(0)
+  // Ten lanes, all the same width, none wider than a tenth of a lone block.
+  const lone = (await calendarBlock(page, SEED.todayEntries[0]!).boundingBox())!
+  const widths = await Promise.all(names.map(async n => (await calendarBlock(page, n).boundingBox())!.width))
+  for (const w of widths) expect(w).toBeLessThan(lone.width * 0.12)
+  expect(Math.max(...widths) - Math.min(...widths)).toBeLessThan(2)
+})
+
+test('deleting from a fold\'s row lands focus on the page, not on <body>', async ({ page, api }) => {
+  await createEntry(api, { name: OVERLAP, billable: true, ...todaySlot(16, 18) })
+  await page.goto('/calendar')
+  await waitForLanesMeasured(page)
+
+  await calendarFold(page, BLOCK, OVERLAP).click()
+  await foldList(page).getByRole('button', { name: `Edit ${BLOCK}, 3:00pm – 5:00pm`, exact: true }).click()
+  const dialog = page.getByRole('dialog').filter({
+    has: page.getByRole('heading', { name: 'Edit entry' })
+  })
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: /^Delete/ }).click()
+  await expect(dialog).toBeHidden()
+
+  // BLOCK is gone, so the pair no longer folds and the fold button that
+  // opened the dialog has unmounted. Focus can't go back to it; it goes to
+  // <main>, the same landing the picker uses — never to <body>.
+  await expect(calendarBlock(page, OVERLAP)).toBeVisible()
+  await expect(page.locator('#main')).toBeFocused()
 })
