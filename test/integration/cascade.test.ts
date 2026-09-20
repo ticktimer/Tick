@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   closeTestDb,
   registerAccount,
+  stopAllTimers,
   type ApiClient,
   type TestAccount
 } from '../helpers/server'
@@ -29,7 +30,7 @@ beforeAll(async () => {
 }, 60_000)
 
 afterAll(async () => {
-  await api.post('/api/timer/stop')
+  await stopAllTimers(api)
   await closeTestDb()
 })
 
@@ -113,17 +114,17 @@ describe('GET /api/:entity/:id/cascade — counts match reality', () => {
     expect(del.body.deleted.entries).toHaveLength(counts.body.entries)
   })
 
-  it('counts ignore trashed rows and the running timer', async () => {
+  it('counts ignore trashed rows and running timers', async () => {
     const t = await makeTree()
     await api.del(`/api/entries/${t.e2.id}`) // trash one of the three
-    const started = await api.post('/api/timer/start', { refType: 'task', refId: t.task.id })
+    const started = await api.post('/api/timers', { refType: 'task', refId: t.task.id })
     expect(started.status).toBe(200)
     try {
       const counts = await api.get(`/api/clients/${t.client.id}/cascade`)
-      // 3 - 1 trashed = 2; the running (end IS NULL) row is never counted.
+      // 3 - 1 trashed = 2; running (end IS NULL) rows are never counted.
       expect(counts.body).toEqual({ projects: 1, tasks: 1, entries: 2 })
     } finally {
-      await api.post('/api/timer/stop')
+      await api.post(`/api/timers/${started.body.entryId}/stop`)
     }
   })
 
@@ -262,9 +263,9 @@ describe('DELETE /api/clients/:id — every checkbox combination', () => {
     })
   })
 
-  it('never trashes the running timer, only detaches it', async () => {
+  it('never trashes a running timer, only detaches it', async () => {
     const t = await makeTree()
-    const started = await api.post('/api/timer/start', { refType: 'task', refId: t.task.id })
+    const started = await api.post('/api/timers', { refType: 'task', refId: t.task.id })
     expect(started.status).toBe(200)
     try {
       const res = await api.del(`/api/clients/${t.client.id}`, {
@@ -275,12 +276,13 @@ describe('DELETE /api/clients/:id — every checkbox combination', () => {
       expect(res.body.deleted.entries).not.toContain(started.body.entryId)
       expect(res.body.detached.entries).toBe(1)
 
-      const timer = await api.get('/api/timer')
-      expect(timer.status).toBe(200)
-      expect(timer.body.entryId).toBe(started.body.entryId)
-      expect(timer.body.ref).toBeNull()
+      const timers = await api.get('/api/timers')
+      expect(timers.status).toBe(200)
+      const timer = timers.body.find((x: any) => x.entryId === started.body.entryId)
+      expect(timer).toBeTruthy()
+      expect(timer.ref).toBeNull()
     } finally {
-      await api.post('/api/timer/stop')
+      await api.post(`/api/timers/${started.body.entryId}/stop`)
     }
   })
 })

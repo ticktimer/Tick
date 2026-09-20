@@ -154,8 +154,9 @@ describe('reads and non-destructive writes still work', () => {
       expect(`${method} ${path} -> ${res.status}`).toBe(`${method} ${path} -> 200`)
     }
 
-    const timer = await api.get('/api/timer')
-    expect([200, 204]).toContain(timer.status)
+    const timers = await api.get('/api/timers')
+    expect(timers.status).toBe(200)
+    expect(Array.isArray(timers.body)).toBe(true)
   })
 
   it('import PREVIEW stays open while commit is blocked', async () => {
@@ -178,9 +179,9 @@ describe('reads and non-destructive writes still work', () => {
   })
 
   it('the timer and soft deletes (which the reset undoes) still work', async () => {
-    const started = await api.post('/api/timer/start', { name: 'demo run' })
+    const started = await api.post('/api/timers', { name: 'demo run' })
     expect(started.status).toBe(200)
-    const stopped = await api.post('/api/timer/stop')
+    const stopped = await api.post(`/api/timers/${started.body.entryId}/stop`)
     expect([200, 204]).toContain(stopped.status)
 
     const entry = await api.post('/api/entries', {

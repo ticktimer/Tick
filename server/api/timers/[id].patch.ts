@@ -1,5 +1,11 @@
-// PATCH /api/timer — edit the running entry: rename, attach/detach ref
-// (refId: null detaches), toggle billable. 404 when nothing is running.
+// PATCH /api/timers/:id — edit one running entry: rename, attach/detach ref
+// (refId: null detaches), toggle billable. The other running timers are
+// untouched.
+//
+// 404 'No timer running.' when the id is unknown, already ended, trashed, or
+// belongs to another user/org. The message stays generic on purpose: a
+// specific one would tell a caller that an id exists in someone else's org
+// (test/integration/org-scoping.test.ts asserts it).
 import { z } from 'zod'
 
 const bodySchema = z
@@ -15,6 +21,7 @@ const bodySchema = z
 
 export default defineEventHandler(async (event): Promise<TimerState> => {
   const user = await requireAuth(event)
+  const id = uuidRouterParam(event, 'id')
   const body = await readSanitizedBody(event, bodySchema)
   const db = useDrizzle()
 
@@ -23,6 +30,7 @@ export default defineEventHandler(async (event): Promise<TimerState> => {
     .from(schema.timeEntries)
     .where(
       and(
+        eq(schema.timeEntries.id, id),
         eq(schema.timeEntries.orgId, user.orgId),
         eq(schema.timeEntries.userId, user.id),
         isNull(schema.timeEntries.end),

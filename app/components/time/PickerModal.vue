@@ -1,7 +1,9 @@
 <script setup lang="ts">
 // Client / Project / Task picker (520px dialog, 12vh from the top).
 // Serves the timer bar, the Manual-entry dialog and SelectionBar's "Move to…":
-// reads uiStore.pickerTarget — 'timer' → timerStore.attach(type, id);
+// reads uiStore.pickerTarget — 'timer' → timerStore.attach(type, id, whichever
+// running timer uiStore.pickerTimerId named when the dialog opened, null = the
+// draft/composer (ticktimer/Tick#37: "the timer" is no longer a single thing);
 // 'manual' → writes uiStore.pickerResult for the dialog to consume;
 // 'bulk' → entriesStore.bulkReassign on the selection (plus a "No client /
 // project / task" row that clears refs) with an Undo toast.
@@ -159,7 +161,19 @@ function buildChain(refType: RefType, refId: string): ChainRef {
 
 function pick(refType: RefType, refId: string) {
   if (ui.pickerTarget === 'timer') {
-    timer.attach(refType, refId)
+    // pickerTimerId is passed straight through, `null` included: null means
+    // "the draft", which is a decision already made when the dialog opened.
+    // Collapsing it to undefined would make the store work the target out again
+    // now — and "now" can be after a refocus hydrate pulled in a timer started
+    // on another device, which would land this ref on that timer instead of on
+    // the draft the user was actually filling in.
+    //
+    // A rejection here is a 404: the timer was stopped from the running list or
+    // on another device while the dialog sat open. Re-sync and let the server
+    // win, like every other 4xx path — silently swallowing it left the picker
+    // looking like it had worked and the store believing in a timer that had
+    // already ended.
+    timer.attach(refType, refId, ui.pickerTimerId).catch(() => timer.hydrate())
   } else if (ui.pickerTarget === 'bulk') {
     const chain = buildChain(refType, refId)
     void bulkMove(refType, refId, chain.taskName ?? chain.projectName ?? chain.clientName ?? 'target')

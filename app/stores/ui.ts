@@ -2,6 +2,9 @@
 // PickerModal (time agent) reads pickerOpen/pickerTarget/pickerTab and writes pickerResult
 // for the manual-entry dialog; the timer bar and pages only flip this state.
 // pickerTarget 'bulk' = SelectionBar's "Move to…" (picker reassigns the selection itself).
+// pickerTarget 'timer' also carries pickerTimerId: since ticktimer/Tick#37 several
+// timers can run at once, so "the timer" is not a thing the picker can work out
+// for itself — the opener names the row it means.
 
 export type PickerTarget = 'timer' | 'manual' | 'bulk'
 
@@ -10,6 +13,13 @@ export const useUiStore = defineStore('ui', () => {
   const pickerTarget = ref<PickerTarget>('timer')
   /** Which tab the picker opens on (set by the timer bar's + menu). */
   const pickerTab = ref<RefType>('task')
+  /**
+   * Target 'timer' only: which running timer the pick attaches to. null means
+   * the draft/composer. Captured when the picker opens so a background
+   * re-hydrate (another device starting a timer) can't move the target while
+   * the dialog is open.
+   */
+  const pickerTimerId = ref<string | null>(null)
   /** Set by PickerModal when target is 'manual'; ManualEntryDialog consumes + clears it. */
   const pickerResult = ref<ChainRef | null>(null)
 
@@ -48,14 +58,16 @@ export const useUiStore = defineStore('ui', () => {
     } catch { /* storage unavailable — pref just won't persist */ }
   }
 
-  function openPicker(target: PickerTarget, tab: RefType = 'task') {
+  function openPicker(target: PickerTarget, tab: RefType = 'task', timerId: string | null = null) {
     pickerTarget.value = target
     pickerTab.value = tab
+    pickerTimerId.value = timerId
     pickerOpen.value = true
   }
 
   function closePicker() {
     pickerOpen.value = false
+    pickerTimerId.value = null
   }
 
   function openManual() {
@@ -85,6 +97,7 @@ export const useUiStore = defineStore('ui', () => {
     pickerOpen,
     pickerTarget,
     pickerTab,
+    pickerTimerId,
     pickerResult,
     manualOpen,
     editEntry,

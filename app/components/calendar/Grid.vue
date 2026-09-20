@@ -12,8 +12,15 @@
 // at its top/bottom edges (immediate drag, no second long-press); tap = start
 // again, as on desktop. While a touch drag is live, touchmove is prevented
 // (non-passive) so the browser never steals the gesture for scrolling.
-// The running timer renders as a live non-interactive block growing to now.
-import type { EntryDto } from '#shared/types'
+// Every running timer renders as a live non-interactive block growing to now
+// (ticktimer/Tick#37 — there can be several). Blocks that overlap in time —
+// ended, running, or one of each — share the column in lanes, and a cluster
+// whose lanes would be too narrow to carry a name beside its ▶ folds into ONE
+// block that lists its members; clicking it discloses them ("Lanes and folds"
+// below).
+import type { EntryDto, TimerState } from '#shared/types'
+import type { Fold, FoldMember } from '~/utils/calendar-fold'
+import { MAX_RUNNING_TIMERS } from '#shared/utils/timers'
 
 const HOUR_PX = 48
 const SNAP = 5
@@ -80,9 +87,8 @@ const hourBounds = computed(() => {
     const s = new Date(e.start).getTime()
     consider(s, s + e.durationSec * 1000)
   }
-  if (timer.timer) {
-    const s = new Date(timer.timer.start).getTime()
-    consider(s, now.value)
+  for (const t of timer.timers) {
+    consider(new Date(t.start).getTime(), now.value)
   }
   return { h0: Math.max(0, h0), h1: Math.min(24, h1) }
 })
@@ -440,30 +446,36 @@ function openEntry(entry: EntryDto) {
 
 const busy = ref(false)
 
+/** Starts an ADDITIONAL timer for this block; nothing already running stops. */
 async function startAgain(entry: EntryDto) {
   if (suppressClick.value || busy.value) return
   busy.value = true
   try {
-    if (timer.running) {
-      const dto = await timer.stop()
-      if (dto && dayStartOf(new Date(dto.start).getTime()) >= calendar.rangeStart && new Date(dto.start).getTime() < calendar.rangeEnd) {
-        calendar.entries.push(dto)
-      }
-    }
     await timer.start({
       name: entry.name,
       refType: entry.ref?.refType,
       refId: entry.ref?.refId,
       billable: entry.billable
     })
-  } catch {
-    await timer.hydrate()
+  } catch (err) {
+    if (isTimerCapError(err)) {
+      toast.add({
+        title: timerCapMessage(err),
+        description: `Stop one of the ${MAX_RUNNING_TIMERS} running timers before starting another.`,
+        icon: 'i-lucide-alarm-clock-off',
+        color: 'neutral'
+      })
+    } else {
+      await timer.hydrate()
+    }
   } finally {
     busy.value = false
   }
 }
 
 // ── Block layout ────────────────────────────────────────────────────────────
+type Lane = ReturnType<typeof assignLanes>[number]
+
 interface Block {
   id: string
   entry: EntryDto
@@ -484,13 +496,15 @@ function heightOf(startMin: number, endMin: number): number {
   return Math.max(22, (endMin - startMin) * (HOUR_PX / 60) - 2)
 }
 
-function subFor(e: EntryDto): string {
+/** Chain (deepest first, with the client) or tags — under a block and in a
+ *  fold's list. A running timer has a chain but no tags, hence the loose shape. */
+function subFor(e: Pick<EntryDto, 'ref'> & { tags?: string[] }): string {
   const r = e.ref
   const first = r?.taskName ?? r?.projectName ?? r?.clientName
   if (first) {
     return r!.clientName && r!.clientName !== first ? `${first} · ${r!.clientName}` : first
   }
-  return e.tags.length ? '#' + e.tags.join(' #') : 'No project'
+  return e.tags?.length ? '#' + e.tags.join(' #') : 'No project'
 }
 
 const dayBlocks = computed<Block[][]>(() => {
@@ -549,25 +563,236 @@ const ghost = computed(() => {
   }
 })
 
-/** Live block for the running timer (non-draggable, grows to now). */
-const runningBlock = computed(() => {
-  if (!timer.timer) return null
-  const startTs = new Date(timer.timer.start).getTime()
+/** Live blocks, one per running timer (non-draggable, each growing to now). */
+interface RunningBlock {
+  id: string
+  dayIdx: number
+  top: number
+  h: number
+  billable: boolean
+  name: string
+  sub: string
+  /** The timer itself — a folded member lists its chain and client colour. */
+  timer: TimerState
+}
+
+function runningBlockOf(t: TimerState): RunningBlock | null {
+  const startTs = new Date(t.start).getTime()
   const dayTs = dayStartOf(startTs)
   const di = calendar.days.indexOf(dayTs)
   if (di < 0) return null
   const startMin = (startTs - dayTs) / 60_000
-  const endTs = startTs + timer.elapsedSec * 1000
+  const endTs = startTs + timer.elapsedFor(t.entryId) * 1000
   const endMin = Math.min(1440, (endTs - dayTs) / 60_000)
   return {
+    id: t.entryId,
+    timer: t,
     dayIdx: di,
     top: topOf(startMin),
     h: heightOf(startMin, endMin),
-    billable: timer.timer.billable,
-    name: timer.timer.name || 'Untitled entry',
+    billable: t.billable,
+    name: t.name || 'Untitled entry',
     sub: `${formatTime(startTs, timeZone.value)} – now`
   }
+}
+
+const runningBlocks = computed<RunningBlock[]>(() =>
+  timer.timers.map(runningBlockOf).filter((b): b is RunningBlock => b !== null)
+)
+
+// ── Lanes and folds ─────────────────────────────────────────────────────────
+// Blocks that overlap in time share the column side by side (app/utils/lanes).
+// Ended entries and running timers are laid out TOGETHER, per day: they occupy
+// the same column, and with several timers at once (ticktimer/Tick#37) a
+// running block over an ended one is the normal case, not an edge — never give
+// live blocks a lane pass of their own. Running blocks grow every second, so a
+// cluster can widen as one of them reaches the next entry — that reflow is the
+// point. Keyed by block id.
+//
+// One rule decides between lanes and a fold, per cluster: a lane must stay at
+// least MIN_LANE_PX wide — room for its 2px edge, the 6px pl-1.5, the 28px the
+// block reserves for its ▶ and ~8 characters of 11px name. Narrower than that
+// and the whole cluster is drawn as ONE full-width block that lists its members
+// by name (the fold face, in the template); clicking it discloses
+// CalendarClusterList, where every ended member has an edit row with its own
+// ▶ and a running one its live clock. A Tick week column is never wider than
+// 158px, so any overlap in Week view folds; Day view keeps up to three lanes on
+// a phone, eight on a 1024 laptop and all ten timers at 1440. The block being
+// dragged leaves the lane pass while it moves — it paints full-width at z-10
+// and joins whatever it lands on only on release — so clusters never fold or
+// unfold under the pointer.
+const COL_PAD = 3 // px each side — what inset-x-[3px] used to give every block
+const LANE_GAP = 2 // px between neighbours; none when a block has the column to itself
+/** 2px edge + 6px pl-1.5 + 28px ▶ reserve + 44px of 11px/500 name (~8 chars). */
+const MIN_LANE_PX = 80
+/**
+ * Week's widest possible column, assumed until the grid has been measured. The
+ * server always renders Week (`view` is never persisted; mobile switches to Day
+ * post-mount), and at 158px every overlap folds whatever the desktop width, so
+ * the hydrating render agrees with the server; Day view is only ever entered
+ * after the measurement has landed.
+ */
+const SSR_COL_PX = 158
+
+const { width: gridW } = useElementSize(gridEl)
+/** False during SSR and the hydrating render — e2e waits for `data-lanes-measured`. */
+const lanesMeasured = computed(() => gridW.value > 0)
+const colPx = computed(() => (lanesMeasured.value ? (gridW.value - 52) / calendar.dayCount : SSR_COL_PX))
+
+type LaneItem = Block | RunningBlock
+
+interface DayLayout {
+  laneById: Map<string, Lane>
+  /** Ids a fold stands in for — drawn by it, not as blocks. */
+  hidden: Set<string>
+  folds: Fold[]
+}
+
+function foldMemberOf(it: LaneItem): { id: string, startTs: number, endTs: number, member: FoldMember } {
+  const tz = timeZone.value
+  if ('entry' in it) {
+    const e = it.entry
+    const startTs = new Date(e.start).getTime()
+    return {
+      id: it.id,
+      startTs,
+      endTs: startTs + e.durationSec * 1000,
+      member: {
+        kind: 'entry',
+        entry: e,
+        name: it.name,
+        sub: it.sub,
+        range: formatRange(e.start, e.end ?? e.start, tz),
+        duration: formatDuration(e.durationSec),
+        clientColor: e.ref?.clientColor
+      }
+    }
+  }
+  const startTs = new Date(it.timer.start).getTime()
+  return {
+    id: it.id,
+    startTs,
+    endTs: now.value,
+    member: { kind: 'timer', id: it.id, name: it.name, sub: subFor(it.timer), range: it.sub, clientColor: it.timer.ref?.clientColor }
+  }
+}
+
+/**
+ * An item's span in minutes of its day — what "overlap" means, independent of
+ * the 22px floor a drawn block gets. A running timer ends at now.
+ */
+function timeSpanOf(it: LaneItem, dayTs: number): { top: number, h: number } {
+  const startTs = 'entry' in it ? new Date(it.entry.start).getTime() : new Date(it.timer.start).getTime()
+  const endTs = 'entry' in it ? startTs + it.entry.durationSec * 1000 : now.value
+  const top = (startTs - dayTs) / 60_000
+  return { top, h: Math.max(1 / 60, Math.min(1440, (endTs - dayTs) / 60_000) - top) }
+}
+
+/**
+ * One fold for a cluster: members in start order (id breaks ties), the drawn
+ * envelope of its blocks as its box, the cluster's time span as its range.
+ * Its id is the first member's, not the cluster's position: clusters are
+ * numbered by position, and a running block growing into an earlier cluster
+ * renumbers the later ones — an open list keyed by position would silently
+ * become another cluster's list. Keyed by member, it stays on its own cluster,
+ * and closes only if an earlier member arrives.
+ */
+function foldOf(dayTs: number, dayIdx: number, items: LaneItem[]): Fold {
+  const sorted = items
+    .map(foldMemberOf)
+    .sort((a, b) => a.startTs - b.startTs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  const running = sorted.filter(m => m.member.kind === 'timer').length
+  const firstStart = sorted[0]!.startTs
+  const lastEnd = Math.max(...sorted.map(m => m.endTs))
+  const top = Math.min(...items.map(it => it.top))
+  const bottom = Math.max(...items.map(it => it.top + it.h))
+  return {
+    id: `${dayTs}:${sorted[0]!.id}`,
+    dayIdx,
+    top,
+    h: Math.max(22, bottom - top),
+    members: sorted.map(m => m.member),
+    count: sorted.length,
+    running,
+    billable: items.every(it => it.billable),
+    rangeText: running
+      ? `${formatTime(firstStart, timeZone.value)} – now`
+      : formatRange(firstStart, lastEnd, timeZone.value)
+  }
+}
+
+const dayLayout = computed<DayLayout[]>(() => calendar.days.map((dayTs, di) => {
+  // The dragging block is left out: it is drawn at its drag position, full
+  // width and above everything, and re-enters the layout on release.
+  const items: LaneItem[] = [
+    ...(dayBlocks.value[di] ?? []).filter(b => !b.dragging),
+    ...runningBlocks.value.filter(b => b.dayIdx === di)
+  ]
+  // Overlap is decided in TIME, never in drawn pixels: heightOf() clamps every
+  // block to 22px, which is 27.5 minutes at 48px an hour, so a 9:00–9:15 and a
+  // 9:25–10:00 overlap on screen without ever overlapping in time. Clustering
+  // on the drawn geometry folded exactly those in Week view — and a folded
+  // entry cannot be dragged or resized. Short neighbours still overlap by a
+  // few pixels, as they did before any of this; they stay two blocks.
+  const spans = items.map(it => timeSpanOf(it, dayTs))
+  const lanes = assignLanes(spans)
+  const laneById = new Map<string, Lane>()
+  items.forEach((it, k) => laneById.set(it.id, lanes[k]!))
+  const hidden = new Set<string>()
+  const folds: Fold[] = []
+  for (const span of clusterSpans(spans, lanes)) {
+    const laneW = (colPx.value - COL_PAD * 2) / span.lanes - LANE_GAP
+    if (span.lanes < 2 || laneW >= MIN_LANE_PX) continue
+    const members = span.members.map(k => items[k]!)
+    for (const it of members) hidden.add(it.id)
+    folds.push(foldOf(dayTs, di, members))
+  }
+  return { laneById, hidden, folds }
+}))
+
+/** Every day's lanes in one map, for the `left`/`width`/`right` helpers below. */
+const laneById = computed<Map<string, Lane>>(() => {
+  const m = new Map<string, Lane>()
+  for (const day of dayLayout.value) {
+    for (const [id, lane] of day.laneById) m.set(id, lane)
+  }
+  return m
 })
+
+/** What a column draws itself — every block not standing in a fold. */
+function drawnBlocks(di: number): Block[] {
+  const hidden = dayLayout.value[di]?.hidden
+  return (dayBlocks.value[di] ?? []).filter(b => !hidden?.has(b.id))
+}
+
+function drawnRunning(di: number): RunningBlock[] {
+  const hidden = dayLayout.value[di]?.hidden
+  return runningBlocks.value.filter(b => b.dayIdx === di && !hidden?.has(b.id))
+}
+
+function foldsOf(di: number): Fold[] {
+  return dayLayout.value[di]?.folds ?? []
+}
+
+/** `left` for a block's lane, as a CSS calc on the column width. */
+function laneLeft(id: string): string {
+  const { lane, lanes } = laneById.value.get(id) ?? { lane: 0, lanes: 1 }
+  return `calc(${COL_PAD}px + ${lane} * ((100% - ${COL_PAD * 2}px) / ${lanes}))`
+}
+
+/** `width` for a block's lane — the full column less padding when alone. */
+function laneWidth(id: string): string {
+  const { lanes } = laneById.value.get(id) ?? { lane: 0, lanes: 1 }
+  return lanes === 1
+    ? `calc(100% - ${COL_PAD * 2}px)`
+    : `calc((100% - ${COL_PAD * 2}px) / ${lanes} - ${LANE_GAP}px)`
+}
+
+/** `right` for something anchored to a block's right edge (the play button). */
+function laneRight(id: string, inset: number): string {
+  const { lane, lanes } = laneById.value.get(id) ?? { lane: 0, lanes: 1 }
+  return `calc(${COL_PAD + inset}px + ${lanes - 1 - lane} * ((100% - ${COL_PAD * 2}px) / ${lanes}))`
+}
 
 /** Accent "now" line on today (only when inside the visible window). */
 const nowLine = computed(() => {
@@ -588,10 +813,134 @@ function blockBg(billable: boolean): string {
 function blockEdge(billable: boolean): string {
   return billable ? 'var(--ui-primary)' : 'var(--ui-color-neutral-500)'
 }
+
+// ── The fold face and its list ──────────────────────────────────────────────
+// One popover per fold, controlled: `openFold` is the id of the one open list
+// (one disclosure at a time — and the timer store opens the bar's running
+// list on a start while something runs, so a ▶ in the list closes it too).
+const openFold = ref<string | null>(null)
+/** The fold whose row opened the edit dialog: focus goes back to it on close. */
+let foldOpener: HTMLElement | null = null
+
+const belowLg = useMediaQuery('(max-width: 1023px)', { ssrWidth: 1280 })
+/** Beside the fold on desktop; under it on a phone, kept clear of the 150px
+ *  dock (+ slack). reka flips to the other side when the preferred one has no
+ *  room, which is the "above the fold" fallback near the bottom of the screen. */
+const foldContent = computed(() => belowLg.value
+  ? { side: 'bottom' as const, align: 'start' as const, sideOffset: 4, collisionPadding: { top: 12, left: 12, right: 12, bottom: 166 } }
+  : { side: 'right' as const, align: 'start' as const, sideOffset: 6, collisionPadding: 12 })
+
+function setOpenFold(id: string, open: boolean) {
+  openFold.value = open ? id : null
+}
+
+/** A press anywhere on the grid but a fold's own face closes the open list.
+ *  Block presses stop propagating, so reka's document-level outside-press
+ *  detection never sees them — this capture-phase hook does the closing. The
+ *  press then does its own job as well (a ▶ starts, a block edits, empty space
+ *  seeds a ghost): the list is non-modal and that is how a popover behaves
+ *  everywhere; it is simply gone before the action lands. The faces are left
+ *  to reka, which toggles them. */
+function onGridDown(e: PointerEvent) {
+  if (openFold.value && !(e.target as Element | null)?.closest('[data-fold]')) openFold.value = null
+}
+
+function foldEl(id: string): HTMLElement | null {
+  return gridEl.value?.querySelector<HTMLElement>(`[data-fold="${id}"]`) ?? null
+}
+
+function onFoldEdit(entry: EntryDto) {
+  foldOpener = openFold.value ? foldEl(openFold.value) : null
+  openFold.value = null
+  ui.openEdit(entry)
+}
+
+function onFoldStart(entry: EntryDto) {
+  openFold.value = null
+  startAgain(entry)
+}
+
+/** What a running-list row tap does: select it into the bar, and show the bar's list. */
+function onFoldShow(id: string) {
+  openFold.value = null
+  timer.pin(id)
+  timer.openList()
+}
+
+// reka returns focus to the fold face on Esc / outside close by itself; after
+// an edit from a row the dialog would hand focus back to a row that no longer
+// exists, so the fold takes it. Next tick, because the dialog releases its
+// focus trap as it starts closing, not before.
+watch(() => ui.editEntry, async (open, was) => {
+  if (!was || open || !foldOpener) return
+  const el = foldOpener
+  foldOpener = null
+  await nextTick()
+  if (el.isConnected) el.focus()
+  else document.getElementById('main')?.focus()
+})
+
+// A focused fold can also vanish AFTER that: delete from its row and the
+// dialog closes first, the range refetches second, and only then does the
+// cluster stop folding and the button unmount — with focus on it, which
+// drops to <body>. Pre-flush, so the button is still the active element
+// when its id is already gone from the layout; <main> is the same landing
+// the picker uses.
+const foldIds = computed(() => new Set(dayLayout.value.flatMap(d => d.folds.map(f => f.id))))
+watch(foldIds, (ids) => {
+  const active = document.activeElement as HTMLElement | null
+  const id = active?.dataset?.fold
+  if (id && !ids.has(id)) document.getElementById('main')?.focus()
+}, { flush: 'pre' })
+
+/** Name rows the face can hold: py-1 leaves h − 8, one 14px row each. */
+function foldRows(f: Fold): number {
+  return Math.max(1, Math.floor((f.h - 8) / 14))
+}
+
+function foldShown(f: Fold): number {
+  return Math.min(f.count, foldRows(f))
+}
+
+function memberKey(m: FoldMember): string {
+  return m.kind === 'entry' ? m.entry.id : m.id
+}
+
+/** Names first, so the visible text leads the accessible name. */
+function foldLabel(f: Fold, d: { wd: string, num: number }): string {
+  return `${f.members.map(m => m.name).join(', ')} · ${f.count} entries${f.running ? ` · ${f.running} running` : ''} · ${d.wd} ${d.num} · ${f.rangeText}`
+}
+
+/** Hover detail: one line per member. */
+function foldTitle(f: Fold): string {
+  return f.members.map(m => `${m.name} · ${m.range}`).join('\n')
+}
+
+/**
+ * Coarse pointers: a bigger hit area on the face ▶ without changing what is
+ * drawn — a pseudo-element grown past the box (MobileTimerCard's idiom). 44px
+ * wide, grown inward over the padding the block reserves for it; only 6px
+ * taller each way, because two back-to-back 30-minute blocks put their ▶s
+ * 6px apart and a taller ring resolves the bottom of one ▶ to the OTHER
+ * block's — starting the wrong timer is worse than a 30px-tall target (WCAG
+ * 2.5.8 wants 24). The fold face gets no band at all: it is already full
+ * column width, and a band past its 22px box took taps from a fold sitting
+ * directly under it. Static, double-quoted strings so Tailwind's scanner sees
+ * content-[''] exactly as written.
+ */
+// Sideways the ring grows INWARD only, over the 28px the block already reserves
+// for its ▶ (pr-7) — never past the column's right edge, where the neighbouring
+// day column has no stacking context of its own and a z-20 ring would have
+// turned the first few pixels of Tuesday into "start Monday's entry".
+const PLAY_HIT_18 = "after:absolute after:-inset-y-[6px] after:-left-[26px] after:right-0 after:content-['']"
+const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] after:right-0 after:content-['']"
 </script>
 
 <template>
-  <div class="overflow-hidden rounded-lg bg-elevated shadow-sm ring ring-default">
+  <div
+    class="overflow-hidden rounded-lg bg-elevated shadow-sm ring ring-default"
+    :data-lanes-measured="lanesMeasured ? '' : undefined"
+  >
     <!-- Day headers -->
     <div class="grid border-b border-default" :style="{ gridTemplateColumns: cols }">
       <div />
@@ -628,6 +977,7 @@ function blockEdge(billable: boolean): string {
         ref="gridEl"
         class="relative grid select-none"
         :style="{ gridTemplateColumns: cols, height: bodyH + 'px', touchAction: 'manipulation' }"
+        @pointerdown.capture="onGridDown"
       >
         <!-- Hour gutter -->
         <div class="relative">
@@ -658,30 +1008,105 @@ function blockEdge(billable: boolean): string {
             :style="{ top: h.top + 'px', background: 'color-mix(in srgb, var(--ui-text) 5%, transparent)' }"
           />
 
-          <!-- Entry blocks -->
-          <template v-for="b in dayBlocks[di]" :key="b.id">
+          <!-- Folds: a cluster too narrow for lanes, drawn as one block that
+               lists its members by name; the click discloses them, each with
+               its own ▶ (there is none on the face — nothing here is legible
+               enough to restart by). pointerdown is swallowed like the ▶'s,
+               so a press never seeds a create ghost or a move; reka's trigger
+               toggles on click and supplies aria-haspopup/expanded/controls.
+               Rendered before the entry blocks: where the 22px floor makes a
+               short block and a fold touch, the block paints (and hit-tests)
+               on top, as blocks already do to each other. -->
+          <UPopover
+            v-for="f in foldsOf(di)"
+            :key="f.id"
+            :open="openFold === f.id"
+            :content="foldContent"
+            :ui="{ content: 'w-[min(100vw-24px,360px)] p-1' }"
+            @update:open="setOpenFold(f.id, $event)"
+          >
+            <button
+              type="button"
+              :data-fold="f.id"
+              :title="foldTitle(f)"
+              :aria-label="foldLabel(f, d)"
+              class="tick-rise absolute flex cursor-pointer flex-col gap-0 rounded-sm py-1 pl-1.5 pr-1.5 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
+              :style="{
+                top: f.top + 'px',
+                height: f.h + 'px',
+                left: COL_PAD + 'px',
+                right: COL_PAD + 'px',
+                background: blockBg(f.billable),
+                borderLeft: `2px solid ${f.running ? 'var(--ui-primary)' : blockEdge(f.billable)}`,
+                boxShadow: f.running ? '0 0 8px color-mix(in srgb, var(--ui-primary) 45%, transparent)' : undefined
+              }"
+              @pointerdown.stop
+            >
+              <!-- A running member is marked by its dot (primary, in place of the
+                   client colour — non-text, ≥3:1 on the tint) and by the fold's
+                   own live edge and glow — never by accent TEXT: text-primary on
+                   blockBg measures 4.05:1 in Nocturne and 4.29 in Daylight, under
+                   AA for 11px. Same rule as the chain chip (#39): the tint is
+                   what breaks it, not the shade. -->
+              <span
+                v-for="(m, i) in f.members.slice(0, foldShown(f))"
+                :key="memberKey(m)"
+                class="flex h-[14px] items-center gap-1.5"
+              >
+                <span
+                  class="size-[6px] shrink-0 rounded-full"
+                  :class="m.kind === 'timer' ? 'bg-primary' : ''"
+                  :style="m.kind === 'timer' ? undefined : { background: clientColorVar(m.clientColor) }"
+                />
+                <span class="min-w-0 truncate text-[11px] font-medium leading-[14px] text-highlighted">{{ m.name }}</span>
+                <span
+                  v-if="i === foldShown(f) - 1 && f.count > foldShown(f)"
+                  class="tnum shrink-0 text-[10px] text-toned"
+                >+{{ f.count - foldShown(f) }}</span>
+              </span>
+            </button>
+            <template #content>
+              <CalendarClusterList
+                :fold="f"
+                :day-label="`${d.wd} ${d.num}`"
+                @edit="onFoldEdit"
+                @start="onFoldStart"
+                @show="onFoldShow"
+              />
+            </template>
+          </UPopover>
+
+          <!-- Entry blocks (a folded member is drawn by its fold instead) -->
+          <template v-for="b in drawnBlocks(di)" :key="b.id">
             <button
               type="button"
               :title="b.title || undefined"
               :aria-label="b.title ? `${b.name} · ${d.wd} ${d.num}${b.title.slice(b.name.length)} · ${b.sub}` : undefined"
-              class="absolute inset-x-[3px] flex flex-col gap-px overflow-hidden rounded-sm py-1 pl-1.5 pr-7 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
+              class="absolute flex flex-col gap-px overflow-hidden rounded-sm py-1 pl-1.5 pr-7 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
               :class="[
-                b.dragging ? 'z-10 cursor-grabbing opacity-90 shadow-md' : 'cursor-grab',
+                b.dragging ? `z-10 opacity-90 shadow-md ${drag?.kind === 'move' ? 'cursor-grabbing' : 'cursor-ns-resize'}` : 'cursor-grab',
                 isCoarse && armedId === b.id && !b.dragging ? 'ring ring-primary/60' : ''
               ]"
               :style="{
                 top: b.top + 'px',
                 height: b.h + 'px',
+                left: laneLeft(b.id),
+                width: laneWidth(b.id),
                 background: blockBg(b.billable),
                 borderLeft: `2px solid ${blockEdge(b.billable)}`
               }"
               @pointerdown="onBlockDown(b.entry, di, $event)"
               @click="openEntry(b.entry)"
             >
-              <span class="pointer-events-none absolute inset-x-0 top-0 h-[6px] cursor-ns-resize" />
+              <!-- Resize zones. They receive the pointer (no pointer-events-none):
+                   a cursor only shows on the element under it, and with these
+                   inert the grab hand won everywhere — the ns-resize arrows were
+                   dead CSS. The press still reaches onBlockDown by bubbling,
+                   which measures against currentTarget (the block), not target. -->
+              <span class="absolute inset-x-0 top-0 h-[6px] cursor-ns-resize" />
               <span class="truncate text-[11px] font-medium leading-[1.25] text-highlighted">{{ b.name }}</span>
               <span class="tnum truncate text-[10px] text-toned">{{ b.sub }}</span>
-              <span class="pointer-events-none absolute inset-x-0 bottom-0 h-[6px] cursor-ns-resize" />
+              <span class="absolute inset-x-0 bottom-0 h-[6px] cursor-ns-resize" />
             </button>
 
             <!-- Start again — the only way a block starts the timer. A sibling
@@ -692,9 +1117,9 @@ function blockEdge(billable: boolean): string {
               type="button"
               :aria-label="`Start timer for ${b.name}`"
               :title="`Start timer for ${b.name}`"
-              class="absolute right-[5px] z-20 grid place-items-center rounded-full bg-default/85 text-primary ring-1 ring-primary/50 backdrop-blur-[2px] transition hover:bg-default hover:ring-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ui-primary)]"
-              :class="b.h >= 34 ? 'size-[22px]' : 'size-[18px]'"
-              :style="{ top: (b.top + (b.h - (b.h >= 34 ? 22 : 18)) / 2) + 'px' }"
+              class="absolute z-20 grid place-items-center rounded-full bg-default/85 text-primary ring-1 ring-primary/50 backdrop-blur-[2px] transition hover:bg-default hover:ring-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ui-primary)]"
+              :class="[b.h >= 34 ? 'size-[22px]' : 'size-[18px]', isCoarse ? (b.h >= 34 ? PLAY_HIT_22 : PLAY_HIT_18) : '']"
+              :style="{ top: (b.top + (b.h - (b.h >= 34 ? 22 : 18)) / 2) + 'px', right: laneRight(b.id, 2) }"
               @pointerdown.stop
               @click.stop="startAgain(b.entry)"
             >
@@ -705,16 +1130,16 @@ function blockEdge(billable: boolean): string {
                  dot centers on the block edge; drag starts on contact -->
             <template v-if="isCoarse && armedId === b.id && !b.dragging">
               <span
-                class="absolute left-1/4 z-30 grid size-11 -translate-x-1/2 touch-none place-items-center"
-                :style="{ top: (b.top - 22) + 'px' }"
+                class="absolute z-30 grid size-11 -translate-x-1/2 touch-none place-items-center"
+                :style="{ top: (b.top - 22) + 'px', left: `calc(${laneLeft(b.id)} + ${laneWidth(b.id)} * 0.25)` }"
                 aria-hidden="true"
                 @pointerdown="onHandleDown(b.entry, di, 'resize-top', $event)"
               >
                 <span class="size-3 rounded-full bg-default ring-2 ring-primary" />
               </span>
               <span
-                class="absolute right-1/4 z-30 grid size-11 translate-x-1/2 touch-none place-items-center"
-                :style="{ top: (b.top + b.h - 22) + 'px' }"
+                class="absolute z-30 grid size-11 -translate-x-1/2 touch-none place-items-center"
+                :style="{ top: (b.top + b.h - 22) + 'px', left: `calc(${laneLeft(b.id)} + ${laneWidth(b.id)} * 0.75)` }"
                 aria-hidden="true"
                 @pointerdown="onHandleDown(b.entry, di, 'resize-bottom', $event)"
               >
@@ -723,20 +1148,29 @@ function blockEdge(billable: boolean): string {
             </template>
           </template>
 
-          <!-- Running timer: live, non-interactive -->
+          <!-- Running timers: live, non-interactive. Several at once take
+               lanes beside each other and beside any ended entry they overlap —
+               or stand in a fold with them, as a name row in text-primary. -->
           <div
-            v-if="runningBlock && runningBlock.dayIdx === di"
-            class="pointer-events-none absolute inset-x-[3px] z-[5] flex flex-col gap-px overflow-hidden rounded-sm px-1.5 py-1"
+            v-for="rb in drawnRunning(di)"
+            :key="rb.id"
+            :title="`${rb.name} · ${rb.sub}`"
+            class="pointer-events-none absolute z-[5] flex flex-col gap-px overflow-hidden rounded-sm px-1.5 py-1"
             :style="{
-              top: runningBlock.top + 'px',
-              height: runningBlock.h + 'px',
-              background: blockBg(runningBlock.billable),
+              top: rb.top + 'px',
+              height: rb.h + 'px',
+              left: laneLeft(rb.id),
+              width: laneWidth(rb.id),
+              background: blockBg(rb.billable),
               borderLeft: '2px solid var(--ui-primary)',
               boxShadow: '0 0 8px color-mix(in srgb, var(--ui-primary) 45%, transparent)'
             }"
           >
-            <span class="truncate text-[11px] font-medium leading-[1.25] text-highlighted">{{ runningBlock.name }}</span>
-            <span class="tnum truncate text-[10px] text-primary">{{ runningBlock.sub }}</span>
+            <span class="truncate text-[11px] font-medium leading-[1.25] text-highlighted">{{ rb.name }}</span>
+            <!-- text-toned, not text-primary: on blockBg the accent measures
+                 4.05:1 (Nocturne) / 4.29 (Daylight); the edge and glow already
+                 say "live". Shipped unswept since the single-timer days. -->
+            <span class="tnum truncate text-[10px] text-toned">{{ rb.sub }}</span>
           </div>
 
           <!-- Drag-to-create ghost -->

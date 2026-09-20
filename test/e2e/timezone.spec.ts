@@ -12,7 +12,7 @@
 // the browser's times — a page that only looked right after hydration would
 // still be flashing the wrong day at every visitor.
 import { expect, test } from './helpers/test'
-import { clearRunningTimer, createEntry, deleteEntriesNamed } from './helpers/api'
+import { stopAllTimers, createEntry, deleteEntriesNamed } from './helpers/api'
 import { uniqueName } from './helpers/fixtures'
 
 const HOST_OFFSET_H = -new Date().getTimezoneOffset() / 60
@@ -49,7 +49,7 @@ test.describe('browser timezone differs from the server', () => {
   test.use({ timezoneId: SHIFTED_TZ })
 
   test.beforeEach(async ({ api }) => {
-    await clearRunningTimer(api)
+    await stopAllTimers(api)
     await deleteEntriesNamed(api, ENTRY)
     await createEntry(api, { name: ENTRY, billable: true, ...SLOT })
   })

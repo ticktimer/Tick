@@ -1,15 +1,15 @@
 <script setup lang="ts">
 // Four stat cards: Today / This week / Billable / Unbilled.
-// "Today" ticks live while the timer runs (summary.todaySec excludes the
-// running entry — server entries with end IS NULL aren't summed).
+// "Today" ticks live while the timer runs (summary.todaySec excludes running
+// entries — server entries with end IS NULL aren't summed). With several timers
+// running it adds all of them: the card answers "how much have I tracked
+// today", and every running timer is tracking.
 
 const props = defineProps<{ summary: DashboardSummary }>()
 
 const timer = useTimerStore()
 
-const liveTodaySec = computed(() =>
-  props.summary.todaySec + (timer.running ? timer.elapsedSec : 0)
-)
+const liveTodaySec = computed(() => props.summary.todaySec + timer.totalElapsedSec)
 
 const stats = computed(() => {
   const s = props.summary
@@ -17,9 +17,11 @@ const stats = computed(() => {
     {
       label: 'Today',
       value: dashDuration(liveTodaySec.value),
-      meta: timer.running
-        ? 'timer running'
-        : `${s.todayEntries} ${s.todayEntries === 1 ? 'entry' : 'entries'}`
+      meta: timer.count > 1
+        ? `${timer.count} timers running`
+        : timer.running
+          ? 'timer running'
+          : `${s.todayEntries} ${s.todayEntries === 1 ? 'entry' : 'entries'}`
     },
     {
       label: 'This week',

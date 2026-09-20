@@ -13,7 +13,6 @@ import {
   text,
   timestamp,
   unique,
-  uniqueIndex,
   uuid
 } from 'drizzle-orm/pg-core'
 
@@ -207,9 +206,14 @@ export const timeEntries = pgTable(
     index('time_entries_org_trash_idx')
       .on(t.orgId, t.deletedAt)
       .where(sql`${t.deletedAt} is not null`),
-    // Timer = row with end IS NULL; at most ONE running (non-trashed) entry per user.
-    uniqueIndex('time_entries_one_running_per_user')
-      .on(t.userId)
+    // Timer = row with end IS NULL. A user may run several at once, up to
+    // MAX_RUNNING_TIMERS (Tick#37) — a cap the start route holds inside a
+    // per-user advisory lock, not an invariant the database can express, so
+    // this is a plain lookup index where a partial UNIQUE index used to sit.
+    // Its predicate is exactly the one GET /api/timers and the cap count read,
+    // and leading with (user_id, start) also serves the list's `start ASC`.
+    index('time_entries_user_running_idx')
+      .on(t.userId, t.start)
       .where(sql`${t.end} is null and ${t.deletedAt} is null`),
     check('time_entries_ref_type_check', sql`${t.refType} in ('client', 'project', 'task')`)
   ]

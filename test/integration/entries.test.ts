@@ -130,7 +130,7 @@ describe('GET /api/entries', () => {
     await create({ name: 'other day', start: OTHER_DAY, end: OTHER_DAY_END })
     await api.del(`/api/entries/${trashed.id}`)
 
-    const running = await api.post('/api/timer/start', { name: 'running now' })
+    const running = await api.post('/api/timers', { name: 'running now' })
     expect(running.status).toBe(200)
     try {
       const rows = await listRange()
@@ -139,7 +139,7 @@ describe('GET /api/entries', () => {
       expect(rows.map(r => r.name)).not.toContain('running now')
       expect(rows.map(r => r.name)).not.toContain('other day')
     } finally {
-      await api.post('/api/timer/stop')
+      await api.post(`/api/timers/${running.body.entryId}/stop`)
     }
   })
 
@@ -366,8 +366,8 @@ describe('POST /api/entries/bulk', () => {
     ).toBe(400)
   })
 
-  it('never trashes the running timer through a bulk delete', async () => {
-    const started = await api.post('/api/timer/start', { name: 'protected' })
+  it('never trashes a running timer through a bulk delete', async () => {
+    const started = await api.post('/api/timers', { name: 'protected' })
     expect(started.status).toBe(200)
     try {
       const res = await api.post('/api/entries/bulk', {
@@ -376,9 +376,11 @@ describe('POST /api/entries/bulk', () => {
       })
       expect(res.status).toBe(200)
       expect(res.body.deleted.entries).toEqual([])
-      expect((await api.get('/api/timer')).body.entryId).toBe(started.body.entryId)
+      expect((await api.get('/api/timers')).body.map((t: any) => t.entryId)).toEqual([
+        started.body.entryId
+      ])
     } finally {
-      await api.post('/api/timer/stop')
+      await api.post(`/api/timers/${started.body.entryId}/stop`)
     }
   })
 })

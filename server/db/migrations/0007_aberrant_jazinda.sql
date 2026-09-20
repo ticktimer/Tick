@@ -1,0 +1,2 @@
+DROP INDEX "time_entries_one_running_per_user";--> statement-breakpoint
+CREATE INDEX "time_entries_user_running_idx" ON "time_entries" USING btree ("user_id","start") WHERE "time_entries"."end" is null and "time_entries"."deleted_at" is null;

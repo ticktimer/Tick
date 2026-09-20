@@ -2,7 +2,7 @@
 // setup and, above all, cleanup: every spec deletes what it created through
 // these so a re-run starts from the same fixture.
 import { expect, type APIRequestContext } from '@playwright/test'
-import type { DeleteResult, EntryDto } from '../../../shared/types'
+import type { DeleteResult, EntryDto, TimerState } from '../../../shared/types'
 
 /** Local midnight today → local midnight tomorrow, as ISO strings. */
 export function todayRange(): { from: string, to: string } {
@@ -81,22 +81,60 @@ export async function restoreDeleted(request: APIRequestContext, result: DeleteR
   expect(res.ok(), `POST /api/restore → ${res.status()}`).toBe(true)
 }
 
+/** Everything currently running, in the server's order (start ASC, id ASC). */
+export async function listTimers(request: APIRequestContext): Promise<TimerState[]> {
+  const res = await request.get('/api/timers')
+  expect(res.ok(), `GET /api/timers → ${res.status()}`).toBe(true)
+  return res.json() as Promise<TimerState[]>
+}
+
 /**
- * Stops a running timer if there is one and removes the entry it produced.
- * Every spec that starts a timer calls this in afterEach — a leaked running
- * timer would make the next spec's start() 409.
+ * Stops every running timer and removes the entries they produced. Since
+ * ticktimer/Tick#37 a user may run up to MAX_RUNNING_TIMERS at once, so cleanup
+ * is a sweep rather than a single stop. Every spec that starts a timer calls
+ * this in afterEach — leaked running timers would eat into the next spec's cap
+ * and show up in its timer list.
+ *
+ * Deliberately tolerant: cleanup also runs after a test failed halfway, so a
+ * timer that is already gone is not an error.
  */
-export async function clearRunningTimer(request: APIRequestContext): Promise<void> {
-  const state = await request.get('/api/timer')
-  if (!state.ok()) return
-  const body = await state.text()
-  if (!body || body === 'null') return
-  const stopped = await request.post('/api/timer/stop')
-  if (!stopped.ok()) return
-  const text = await stopped.text()
-  if (!text || text === 'null') return
-  const dto = JSON.parse(text) as EntryDto
-  await deleteEntry(request, dto.id)
+export async function stopAllTimers(request: APIRequestContext): Promise<void> {
+  const res = await request.get('/api/timers')
+  if (!res.ok()) return
+  let running: TimerState[] = []
+  try {
+    running = (await res.json()) as TimerState[]
+  } catch {
+    return
+  }
+  for (const t of running) {
+    const stopped = await request.post(`/api/timers/${t.entryId}/stop`)
+    if (!stopped.ok()) continue
+    const text = await stopped.text()
+    if (!text || text === 'null') continue // <1s elapsed — the server discarded it
+    const dto = JSON.parse(text) as EntryDto
+    await deleteEntry(request, dto.id)
+  }
+}
+
+/**
+ * Trashes every entry dated today for the duration of a test and hands back
+ * what to restore. A fixture built around "now" — a running timer is now by
+ * definition — would otherwise share the column with whichever seeded row the
+ * hour of the run happens to overlap, and fold with it. timer.spec parks the
+ * same rows for the same reason.
+ */
+export async function parkTodaysEntries(request: APIRequestContext): Promise<DeleteResult[]> {
+  const parked: DeleteResult[] = []
+  for (const e of await listEntries(request, todayRange())) {
+    const result = await deleteEntry(request, e.id)
+    if (result) parked.push(result)
+  }
+  return parked
+}
+
+export async function restoreParked(request: APIRequestContext, parked: DeleteResult[]): Promise<void> {
+  for (const result of parked) await restoreDeleted(request, result)
 }
 
 /** Catalog lookup by name, e.g. the project a spec wants to attach. */

@@ -18,6 +18,7 @@ import {
   closeTestDb,
   MAIN_URL,
   registerAccount,
+  stopAllTimers,
   uniqueEmail,
   type TestAccount
 } from '../helpers/server'
@@ -381,28 +382,47 @@ describe('POST /api/restore with a foreign snapshot', () => {
 })
 
 describe('timer isolation', () => {
-  it("B cannot see, edit or stop A's running timer", async () => {
-    const started = await a.post('/api/timer/start', { name: 'Alpha running' })
-    expect(started.status).toBe(200)
+  it("B cannot see, edit or stop A's running timers — not even by id", async () => {
+    const first = await a.post('/api/timers', { name: 'Alpha running' })
+    const second = await a.post('/api/timers', { name: 'Alpha running too' })
+    expect(first.status).toBe(200)
+    expect(second.status).toBe(200)
     try {
-      const bTimer = await b.get('/api/timer')
-      expect([200, 204]).toContain(bTimer.status)
-      expect(bTimer.body).toBeNull()
+      // B's own list never leaks A's rows.
+      const bTimers = await b.get('/api/timers')
+      expect(bTimers.status).toBe(200)
+      expect(bTimers.body).toEqual([])
 
-      expect((await b.patch('/api/timer', { name: 'pwned' })).status).toBe(404)
-      expect((await b.post('/api/timer/stop')).status).toBe(404)
+      // Naming A's ids gets the same generic 404 as an id that exists nowhere,
+      // so B cannot use the message to learn that A's id is real.
+      const unknown = await b.patch(`/api/timers/${RANDOM_UUID}`, { name: 'pwned' })
+      expect(unknown.status).toBe(404)
+      for (const id of [first.body.entryId, second.body.entryId]) {
+        const patched = await b.patch(`/api/timers/${id}`, { name: 'pwned' })
+        expect(patched.status).toBe(404)
+        expect(patched.body.message).toBe(unknown.body.message)
+        expect(patched.body.message).toBe('No timer running.')
 
-      // A's timer is untouched and still named as A left it.
-      const aTimer = await a.get('/api/timer')
-      expect(aTimer.status).toBe(200)
-      expect(aTimer.body.name).toBe('Alpha running')
+        const stopped = await b.post(`/api/timers/${id}/stop`)
+        expect(stopped.status).toBe(404)
+        expect(stopped.body.message).toBe(unknown.body.message)
+      }
 
-      // The one-running-per-user index is per user, not global.
-      const bStart = await b.post('/api/timer/start', { name: 'Bravo running' })
+      // A's timers are untouched and still named as A left them.
+      const aTimers = await a.get('/api/timers')
+      expect(aTimers.status).toBe(200)
+      expect([...aTimers.body.map((t: any) => t.name)].sort()).toEqual([
+        'Alpha running',
+        'Alpha running too'
+      ])
+
+      // The cap is per user, not global: B starts its own regardless of A's.
+      const bStart = await b.post('/api/timers', { name: 'Bravo running' })
       expect(bStart.status).toBe(200)
-      await b.post('/api/timer/stop')
+      await b.post(`/api/timers/${bStart.body.entryId}/stop`)
     } finally {
-      await a.post('/api/timer/stop')
+      await stopAllTimers(a)
+      await stopAllTimers(b)
     }
   })
 })
@@ -476,7 +496,7 @@ describe('unauthenticated access', () => {
       ['GET', '/api/tasks'],
       ['GET', '/api/tags'],
       ['GET', `/api/entries?from=${FROM}&to=${TO}`],
-      ['GET', '/api/timer'],
+      ['GET', '/api/timers'],
       ['GET', '/api/org'],
       ['GET', '/api/trash'],
       ['GET', '/api/summary/dashboard'],
@@ -490,7 +510,9 @@ describe('unauthenticated access', () => {
     }
 
     // Mutations too — including the ones that carry an id.
-    expect((await anon.post('/api/timer/start', {})).status).toBe(401)
+    expect((await anon.post('/api/timers', {})).status).toBe(401)
+    expect((await anon.patch(`/api/timers/${RANDOM_UUID}`, { name: 'x' })).status).toBe(401)
+    expect((await anon.post(`/api/timers/${RANDOM_UUID}/stop`)).status).toBe(401)
     expect((await anon.patch(`/api/entries/${A.entry.id}`, { name: 'x' })).status).toBe(401)
     expect((await anon.del(`/api/entries/${A.entry.id}`)).status).toBe(401)
     expect(

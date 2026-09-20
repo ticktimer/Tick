@@ -1,9 +1,26 @@
 // Mobile shell (<1024px): bottom tab bar, docked timer card, picker as a
 // bottom sheet. Runs in the `mobile` project only — 390×844 with touch.
 import { expect, test } from './helpers/test'
-import { clearRunningTimer, createEntry, deleteEntriesNamed, listEntries } from './helpers/api'
-import { bulkActionsBar, entryRow, group, picker, timerClock, timerInput, timerPlus, timerToggle } from './helpers/dom'
-import { uniqueName } from './helpers/fixtures'
+import { stopAllTimers, createEntry, deleteEntriesNamed, listEntries } from './helpers/api'
+import {
+  addTimerButton,
+  calendarBlock,
+  calendarFold,
+  closeTimerListButton,
+  bulkActionsBar,
+  entryRow,
+  group,
+  picker,
+  timerClock,
+  timerCount,
+  timerInput,
+  timerList,
+  timerListRow,
+  timerPlus,
+  timerToggle,
+  waitForLanesMeasured
+} from './helpers/dom'
+import { SEED, uniqueName } from './helpers/fixtures'
 
 const VIEWPORT = { width: 390, height: 844 }
 const TIMER_NAME = uniqueName('E2E mobile timer')
@@ -26,11 +43,11 @@ function slot(hour: number, minutes = 30) {
 
 test.describe('mobile shell', { tag: '@mobile' }, () => {
   test.beforeEach(async ({ api }) => {
-    await clearRunningTimer(api)
+    await stopAllTimers(api)
   })
 
   test.afterEach(async ({ api }) => {
-    await clearRunningTimer(api)
+    await stopAllTimers(api)
     await deleteEntriesNamed(api, TIMER_NAME, ...created)
     created.clear()
   })
@@ -65,6 +82,90 @@ test.describe('mobile shell', { tag: '@mobile' }, () => {
     await expect(timerToggle(page)).toHaveAccessibleName('Start')
     await page.waitForURL('**/time')
     await expect(entryRow(group(page, 'Today'), TIMER_NAME)).toBeVisible()
+  })
+
+  // ── ticktimer/Tick#37 ────────────────────────────────────────────────────
+  // The layout reserves a fixed pb-[calc(150px+env(safe-area-inset-bottom))]
+  // for the dock, so the running list has to float ABOVE the card rather than
+  // add a row to it. If the card ever grows, the reserved padding stops
+  // matching and the last entry row slides under the dock.
+  test('the running list opens above the dock without changing its height', async ({ page }) => {
+    await page.goto('/time')
+
+    const dock = page.getByRole('region', { name: 'Timer' }).filter({ visible: true })
+    const idle = await dock.boundingBox()
+    expect(idle).not.toBeNull()
+
+    await timerInput(page).fill(TIMER_NAME)
+    await timerToggle(page).click()
+    await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+    await expect(timerCount(page)).toBeVisible()
+
+    // Row 2 gained a count chip and an "Add a timer" button — both shorter
+    // than the "+" that already set that row's height.
+    const withTimer = await dock.boundingBox()
+    expect(Math.round(withTimer!.height)).toBe(Math.round(idle!.height))
+    expect(Math.round(withTimer!.y)).toBe(Math.round(idle!.y))
+
+    await timerCount(page).click()
+    await expect(timerList(page)).toBeVisible()
+    await expect(timerListRow(page, TIMER_NAME)).toBeVisible()
+
+    const opened = await dock.boundingBox()
+    expect(Math.round(opened!.height)).toBe(Math.round(idle!.height))
+    expect(Math.round(opened!.y)).toBe(Math.round(idle!.y))
+
+    // …and the list really is an overlay: its whole box sits above the card.
+    // Polled, because it rises in on mount (tick-rise, 180ms).
+    await expect.poll(async () => {
+      const b = await timerList(page).boundingBox()
+      return b ? Math.round(b.y + b.height) <= Math.round(opened!.y) : null
+    }).toBe(true)
+
+    // A tap on the page behind it dismisses it, like any transient sheet.
+    await page.getByRole('heading', { name: 'Time', exact: true }).tap()
+    await expect(timerList(page)).toBeHidden()
+    await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('"Add a timer" starts a second one from the dock', async ({ page }) => {
+    const second = name('E2E mobile second')
+    await page.goto('/time')
+
+    await timerInput(page).fill(TIMER_NAME)
+    await timerToggle(page).click()
+    await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+
+    // Row 2's layout: "+" sits beside the thing it attaches to, and "Add a
+    // timer" holds the right corner.
+    const plusBox = (await timerPlus(page).boundingBox())!
+    const addBox = (await addTimerButton(page).boundingBox())!
+    expect(addBox.x).toBeGreaterThan(plusBox.x)
+
+    await addTimerButton(page).click()
+    await expect(timerToggle(page)).toHaveAccessibleName('Start')
+    await timerInput(page).fill(second)
+    await timerToggle(page).click()
+    await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+
+    // The list opened by itself when the first timer left the card…
+    await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'true')
+    await expect(timerListRow(page, TIMER_NAME)).toBeVisible()
+    await expect(timerListRow(page, second)).toBeVisible()
+
+    // …and the overlay's own ✕ closes it, without reaching back down to the
+    // chip that opened it. The chip reopens it.
+    await closeTimerListButton(page).click()
+    await expect(timerList(page)).toBeHidden()
+    await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'false')
+    await timerCount(page).click()
+    await expect(timerListRow(page, TIMER_NAME)).toBeVisible()
+
+    // Stopping one from the list leaves the other running and stays put.
+    await timerListRow(page, TIMER_NAME).getByRole('button', { name: `Stop ${TIMER_NAME}`, exact: true }).click()
+    await expect(timerListRow(page, TIMER_NAME)).toHaveCount(0)
+    await expect(timerListRow(page, second)).toBeVisible()
+    await expect(timerToggle(page)).toHaveAccessibleName('Stop')
   })
 
   test('the picker opens as a bottom sheet', async ({ page }) => {
@@ -413,4 +514,38 @@ test.describe('mobile shell', { tag: '@mobile' }, () => {
     expect(deleteBox!.x).toBeGreaterThanOrEqual(0)
     expect(deleteBox!.x + deleteBox!.width).toBeLessThanOrEqual(VIEWPORT.width)
   })
+  // ── ticktimer/Tick#37: lanes and folds on a 294px day column ─────────────
+  test('calendar: three overlapping entries keep lanes on a phone; a fourth folds them', async ({ page, api }) => {
+    /** A one-hour entry starting at h:m today — before the seed's 9:05 row. */
+    const at = (h: number, m: number) => {
+      const start = new Date()
+      start.setHours(h, m, 0, 0)
+      return { start: start.toISOString(), end: new Date(start.getTime() + 60 * 60_000).toISOString() }
+    }
+    const names = [name('E2E mobile lane A'), name('E2E mobile lane B'), name('E2E mobile lane C')]
+    for (const [i, n] of names.entries()) await createEntry(api, { name: n, billable: true, ...at(5, i * 20) })
+
+    await page.goto('/calendar')
+    // A phone opens in Day view: one ~294px column.
+    await expect(page.getByRole('button', { name: 'Day', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await waitForLanesMeasured(page)
+
+    // Three lanes are ~94px — enough for a name beside a ▶ — so they stay side
+    // by side, disjoint, each well under a lone block's width.
+    const lone = (await calendarBlock(page, SEED.todayEntries[0]!).boundingBox())!
+    const boxes = await Promise.all(names.map(n => calendarBlock(page, n).boundingBox()))
+    for (const b of boxes) expect(b!.width).toBeLessThan(lone.width * 0.4)
+    const spans = boxes.map(b => [b!.x, b!.x + b!.width] as const).sort((a, b) => a[0] - b[0])
+    for (let i = 1; i < spans.length; i++) expect(spans[i]![0]).toBeGreaterThanOrEqual(spans[i - 1]![1] - 1)
+
+    // A fourth in the same hour would need ~70px lanes — under the floor — so
+    // the whole cluster is drawn as one block naming all four, in start order.
+    const fourth = name('E2E mobile lane D')
+    await createEntry(api, { name: fourth, billable: true, ...at(5, 50) })
+    await page.goto('/calendar')
+    await waitForLanesMeasured(page)
+    await expect(calendarFold(page, ...names, fourth)).toBeVisible()
+    for (const n of [...names, fourth]) await expect(calendarBlock(page, n)).toHaveCount(0)
+  })
+
 })
