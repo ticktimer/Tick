@@ -7,6 +7,8 @@ import { SEED, startsWith, uniqueName } from './helpers/fixtures'
 
 /** Our own block: 3–5pm today, clear of the seeded 9:05/11:30/13:00 blocks. */
 const BLOCK = uniqueName('E2E block')
+/** 4–6pm today: overlaps BLOCK by an hour, so the two must share the column. */
+const OVERLAP = uniqueName('E2E overlap')
 
 /** Names this file starts through the UI, swept in afterEach alongside BLOCK. */
 const running: string[] = []
@@ -31,7 +33,7 @@ test.beforeEach(async ({ api }) => {
 
 test.afterEach(async ({ api }) => {
   await stopAllTimers(api)
-  await deleteEntriesNamed(api, BLOCK, ...running)
+  await deleteEntriesNamed(api, BLOCK, OVERLAP, ...running)
   running.length = 0
 })
 
@@ -142,4 +144,43 @@ test.describe('browser timezone differs from the server', () => {
     await page.getByRole('button', { name: 'Day', exact: true }).click()
     await expect(block(page, BLOCK)).toBeVisible()
   })
+})
+
+// ── ticktimer/Tick#37 ───────────────────────────────────────────────────────
+test('entries that overlap in time share the column side by side', async ({ page, api }) => {
+  // Fixed slots, not "now": a running block's lane is the same code path
+  // (app/utils/lanes, one layout per day over ended + running blocks) and is
+  // pinned by the unit suite; involving the live clock here would make this
+  // pass or fail by the hour of the run.
+  await createEntry(api, { name: OVERLAP, billable: true, ...todaySlot(16, 18) })
+  await page.goto('/calendar')
+
+  const a = block(page, BLOCK)
+  const b = block(page, OVERLAP)
+  const lone = block(page, SEED.todayEntries[0]!) // 9:05, nothing beside it
+  await expect(a).toBeVisible()
+  await expect(b).toBeVisible()
+  await expect(lone).toBeVisible()
+
+  const [boxA, boxB, boxLone] = await Promise.all([a.boundingBox(), b.boundingBox(), lone.boundingBox()])
+
+  // Side by side: their horizontal extents do not intersect…
+  const disjoint = boxA!.x + boxA!.width <= boxB!.x + 1 || boxB!.x + boxB!.width <= boxA!.x + 1
+  expect(disjoint, `blocks overlap horizontally: A ${boxA!.x}–${boxA!.x + boxA!.width}, B ${boxB!.x}–${boxB!.x + boxB!.width}`).toBe(true)
+  // …each has roughly half the column, and a block with nothing beside it
+  // keeps the whole thing.
+  expect(boxA!.width).toBeLessThan(boxLone!.width * 0.6)
+  expect(boxB!.width).toBeLessThan(boxLone!.width * 0.6)
+  expect(Math.abs(boxA!.width - boxB!.width)).toBeLessThan(2)
+
+  // The narrower block is still the same block: its play button is on ITS
+  // right edge, and still starts a timer for it.
+  await b.hover()
+  const play = page.getByRole('button', { name: `Start timer for ${OVERLAP}` })
+  const boxPlay = await play.boundingBox()
+  expect(boxPlay!.x + boxPlay!.width).toBeLessThanOrEqual(boxB!.x + boxB!.width + 1)
+  expect(boxPlay!.x).toBeGreaterThanOrEqual(boxB!.x - 1)
+  await play.click()
+  running.push(OVERLAP)
+  await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([OVERLAP])
 })

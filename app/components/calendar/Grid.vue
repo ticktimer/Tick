@@ -470,6 +470,8 @@ async function startAgain(entry: EntryDto) {
 }
 
 // ── Block layout ────────────────────────────────────────────────────────────
+type Lane = ReturnType<typeof assignLanes>[number]
+
 interface Block {
   id: string
   entry: EntryDto
@@ -589,6 +591,49 @@ const runningBlocks = computed<RunningBlock[]>(() =>
   timer.timers.map(runningBlockOf).filter((b): b is RunningBlock => b !== null)
 )
 
+// ── Lanes ───────────────────────────────────────────────────────────────────
+// Blocks that overlap in time share the column side by side (app/utils/lanes).
+// Ended entries and running timers are laid out TOGETHER, per day: they occupy
+// the same column, and with several timers at once (ticktimer/Tick#37) a
+// running block over an ended one is the normal case, not an edge. Running
+// blocks grow every second, so a cluster can widen as one of them reaches the
+// next entry — that reflow is the point. Keyed by block id.
+const COL_PAD = 3 // px each side — what inset-x-[3px] used to give every block
+const LANE_GAP = 2 // px between neighbours; none when a block has the column to itself
+
+const laneById = computed<Map<string, Lane>>(() => {
+  const m = new Map<string, Lane>()
+  calendar.days.forEach((_, di) => {
+    const items: Array<{ id: string, top: number, h: number }> = [
+      ...(dayBlocks.value[di] ?? []),
+      ...runningBlocks.value.filter(b => b.dayIdx === di)
+    ]
+    const lanes = assignLanes(items)
+    items.forEach((it, k) => m.set(it.id, lanes[k]!))
+  })
+  return m
+})
+
+/** `left` for a block's lane, as a CSS calc on the column width. */
+function laneLeft(id: string): string {
+  const { lane, lanes } = laneById.value.get(id) ?? { lane: 0, lanes: 1 }
+  return `calc(${COL_PAD}px + ${lane} * ((100% - ${COL_PAD * 2}px) / ${lanes}))`
+}
+
+/** `width` for a block's lane — the full column less padding when alone. */
+function laneWidth(id: string): string {
+  const { lanes } = laneById.value.get(id) ?? { lane: 0, lanes: 1 }
+  return lanes === 1
+    ? `calc(100% - ${COL_PAD * 2}px)`
+    : `calc((100% - ${COL_PAD * 2}px) / ${lanes} - ${LANE_GAP}px)`
+}
+
+/** `right` for something anchored to a block's right edge (the play button). */
+function laneRight(id: string, inset: number): string {
+  const { lane, lanes } = laneById.value.get(id) ?? { lane: 0, lanes: 1 }
+  return `calc(${COL_PAD + inset}px + ${lanes - 1 - lane} * ((100% - ${COL_PAD * 2}px) / ${lanes}))`
+}
+
 /** Accent "now" line on today (only when inside the visible window). */
 const nowLine = computed(() => {
   const di = calendar.days.indexOf(dayStartOf(now.value))
@@ -684,7 +729,7 @@ function blockEdge(billable: boolean): string {
               type="button"
               :title="b.title || undefined"
               :aria-label="b.title ? `${b.name} · ${d.wd} ${d.num}${b.title.slice(b.name.length)} · ${b.sub}` : undefined"
-              class="absolute inset-x-[3px] flex flex-col gap-px overflow-hidden rounded-sm py-1 pl-1.5 pr-7 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
+              class="absolute flex flex-col gap-px overflow-hidden rounded-sm py-1 pl-1.5 pr-7 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
               :class="[
                 b.dragging ? 'z-10 cursor-grabbing opacity-90 shadow-md' : 'cursor-grab',
                 isCoarse && armedId === b.id && !b.dragging ? 'ring ring-primary/60' : ''
@@ -692,6 +737,8 @@ function blockEdge(billable: boolean): string {
               :style="{
                 top: b.top + 'px',
                 height: b.h + 'px',
+                left: laneLeft(b.id),
+                width: laneWidth(b.id),
                 background: blockBg(b.billable),
                 borderLeft: `2px solid ${blockEdge(b.billable)}`
               }"
@@ -712,9 +759,9 @@ function blockEdge(billable: boolean): string {
               type="button"
               :aria-label="`Start timer for ${b.name}`"
               :title="`Start timer for ${b.name}`"
-              class="absolute right-[5px] z-20 grid place-items-center rounded-full bg-default/85 text-primary ring-1 ring-primary/50 backdrop-blur-[2px] transition hover:bg-default hover:ring-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ui-primary)]"
+              class="absolute z-20 grid place-items-center rounded-full bg-default/85 text-primary ring-1 ring-primary/50 backdrop-blur-[2px] transition hover:bg-default hover:ring-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ui-primary)]"
               :class="b.h >= 34 ? 'size-[22px]' : 'size-[18px]'"
-              :style="{ top: (b.top + (b.h - (b.h >= 34 ? 22 : 18)) / 2) + 'px' }"
+              :style="{ top: (b.top + (b.h - (b.h >= 34 ? 22 : 18)) / 2) + 'px', right: laneRight(b.id, 2) }"
               @pointerdown.stop
               @click.stop="startAgain(b.entry)"
             >
@@ -725,16 +772,16 @@ function blockEdge(billable: boolean): string {
                  dot centers on the block edge; drag starts on contact -->
             <template v-if="isCoarse && armedId === b.id && !b.dragging">
               <span
-                class="absolute left-1/4 z-30 grid size-11 -translate-x-1/2 touch-none place-items-center"
-                :style="{ top: (b.top - 22) + 'px' }"
+                class="absolute z-30 grid size-11 -translate-x-1/2 touch-none place-items-center"
+                :style="{ top: (b.top - 22) + 'px', left: `calc(${laneLeft(b.id)} + ${laneWidth(b.id)} * 0.25)` }"
                 aria-hidden="true"
                 @pointerdown="onHandleDown(b.entry, di, 'resize-top', $event)"
               >
                 <span class="size-3 rounded-full bg-default ring-2 ring-primary" />
               </span>
               <span
-                class="absolute right-1/4 z-30 grid size-11 translate-x-1/2 touch-none place-items-center"
-                :style="{ top: (b.top + b.h - 22) + 'px' }"
+                class="absolute z-30 grid size-11 -translate-x-1/2 touch-none place-items-center"
+                :style="{ top: (b.top + b.h - 22) + 'px', left: `calc(${laneLeft(b.id)} + ${laneWidth(b.id)} * 0.75)` }"
                 aria-hidden="true"
                 @pointerdown="onHandleDown(b.entry, di, 'resize-bottom', $event)"
               >
@@ -743,15 +790,18 @@ function blockEdge(billable: boolean): string {
             </template>
           </template>
 
-          <!-- Running timers: live, non-interactive. Several may overlap in
-               time; they overlap visually, exactly as ended entries do. -->
+          <!-- Running timers: live, non-interactive. Several at once take
+               lanes beside each other and beside any ended entry they overlap. -->
           <div
             v-for="rb in runningBlocks.filter(b => b.dayIdx === di)"
             :key="rb.id"
-            class="pointer-events-none absolute inset-x-[3px] z-[5] flex flex-col gap-px overflow-hidden rounded-sm px-1.5 py-1"
+            :title="`${rb.name} · ${rb.sub}`"
+            class="pointer-events-none absolute z-[5] flex flex-col gap-px overflow-hidden rounded-sm px-1.5 py-1"
             :style="{
               top: rb.top + 'px',
               height: rb.h + 'px',
+              left: laneLeft(rb.id),
+              width: laneWidth(rb.id),
               background: blockBg(rb.billable),
               borderLeft: '2px solid var(--ui-primary)',
               boxShadow: '0 0 8px color-mix(in srgb, var(--ui-primary) 45%, transparent)'
