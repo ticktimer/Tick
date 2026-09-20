@@ -10,7 +10,7 @@ import AxeBuilder from '@axe-core/playwright'
 import type { AxeResults } from 'axe-core'
 import type { Page } from '@playwright/test'
 import { createTask, deleteTasksNamed, stopAllTimers } from './helpers/api'
-import { addTimerButton, picker, timerCount, timerInput, timerList, timerPlus, timerToggle } from './helpers/dom'
+import { addTimerButton, picker, timerInput, timerList, timerPlus, timerToggle } from './helpers/dom'
 import { uniqueName } from './helpers/fixtures'
 import { expect, test } from './helpers/test'
 
@@ -114,7 +114,7 @@ for (const preset of ['Nocturne', 'Daylight'] as const) {
         await timerToggle(page).click()
         await expect(timerToggle(page)).toHaveAccessibleName('Stop')
 
-        await timerCount(page).click()
+        // Opened on its own once the second timer bumped the first out of the bar.
         await expect(timerList(page)).toBeVisible()
         await checkA11y(page, `running-timer list (${preset})`)
       } finally {

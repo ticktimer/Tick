@@ -180,8 +180,8 @@ test('two timers run at once; stopping one by id leaves the other running', asyn
   // Server truth: two rows with end IS NULL, ordered start ASC.
   await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([NAME, SECOND])
 
-  // ── The list discloses both, and both clocks tick off the one shared now ──
-  await timerCount(page).click()
+  // ── The list opened on its own when the first timer left the bar, and both
+  //    clocks tick off the one shared now ──────────────────────────────────────
   await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'true')
   await expect(timerList(page)).toBeVisible()
 
@@ -211,6 +211,66 @@ test('two timers run at once; stopping one by id leaves the other running', asyn
 
   // The stopped one landed in Today like any other entry.
   await expect(entryRow(group(page, 'Today'), NAME)).toBeVisible()
+})
+
+test('"Add a timer" composes an empty draft and opens the list — nothing starts', async ({ page, api }) => {
+  await page.goto('/time')
+
+  await timerInput(page).fill(NAME)
+  await timerToggle(page).click()
+  await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+  await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'false')
+
+  await addTimerButton(page).click()
+
+  // The bar is now the draft, honestly: blank, 00:00:00, a play button, and
+  // the cursor already in the field. The clock used to keep counting the
+  // timer that had just left the bar — dimmed, under a play button — which
+  // read as "a new timer started by itself at 00:00:07".
+  await expect(timerInput(page)).toHaveValue('')
+  await expect(timerInput(page)).toBeFocused()
+  await expect(timerClock(page)).toHaveText('00:00:00')
+  await expect(timerToggle(page)).toHaveAccessibleName('Start')
+
+  // …and the running timer did not vanish: the list opened with it in.
+  await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'true')
+  await expect(timerListRow(page, NAME)).toBeVisible()
+  await expect(timerRowClock(timerListRow(page, NAME))).not.toHaveText('00:00:00')
+
+  // Nothing started server-side.
+  expect((await listTimers(api)).map(t => t.name)).toEqual([NAME])
+
+  // Pressing it again hands the bar back to the running timer.
+  await addTimerButton(page).click()
+  await expect(addTimerButton(page)).toHaveAttribute('aria-pressed', 'false')
+  await expect(timerInput(page)).toHaveValue(NAME)
+  await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+  await expect(timerClock(page)).not.toHaveText('00:00:00')
+})
+
+test('▶ on an entry while a timer runs adds a second one and opens the list', async ({ page, api }) => {
+  const again = name('E2E timer again')
+  await createEntry(api, { name: again, billable: true, ...slot(6) })
+  await page.goto('/time')
+
+  await timerInput(page).fill(NAME)
+  await timerToggle(page).click()
+  await expect(timerToggle(page)).toHaveAccessibleName('Stop')
+  await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'false')
+
+  // Start again from the row. This used to stop the running timer first; now
+  // it adds one — and since that bumps NAME out of the bar, the list opens so
+  // it is still on screen.
+  await entryRow(group(page, 'Today'), again).getByRole('button', { name: 'Start again' }).click()
+
+  await expect(timerCount(page)).toHaveText(/2\s*running/)
+  await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'true')
+  await expect(timerListRow(page, NAME)).toBeVisible()
+  await expect(timerListRow(page, again)).toBeVisible()
+  await expect(timerListRow(page, again)).toHaveAttribute('aria-current', 'true')
+  await expect(timerInput(page)).toHaveValue(again)
+
+  await expect.poll(async () => (await listTimers(api)).map(t => t.name)).toEqual([NAME, again])
 })
 
 test('pinning keeps a timer in the bar when a newer one starts', async ({ page, api }) => {

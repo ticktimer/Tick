@@ -6,7 +6,9 @@
 // What multiple timers add (only once something runs, so the resting bar never
 // grows): a count chip that discloses ShellTimerList inside the same sticky
 // region, and an "Add a timer" toggle that swaps the bar over to the draft so a
-// second timer can be described without stopping the first.
+// second timer can be described without stopping the first. Whether the list
+// is open lives in the store, because the events that must open it — compose,
+// a start while something already runs — don't all happen in this component.
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { MAX_RUNNING_TIMERS } from '#shared/utils/timers'
 
@@ -21,12 +23,7 @@ const toast = useToast()
  *  (one of the two is CSS-hidden) and the two ids must not collide. */
 const LIST_ID = 'timer-list-desktop'
 
-const listOpen = ref(false)
-
-// Nothing left to disclose — never leave an empty panel pinned open.
-watch(() => timer.count, (n) => {
-  if (n === 0) listOpen.value = false
-})
+const inputEl = ref<HTMLInputElement | null>(null)
 
 // ── Description input ──────────────────────────────────────────────────────
 const nameLocal = ref(timer.currentName)
@@ -120,7 +117,10 @@ const rateLabel = computed(() => {
 })
 
 // ── Clock — derived from the store's single shared `nowMs` ─────────────────
-const clock = computed(() => formatClock(timer.activeElapsedSec))
+// `currentElapsedSec`, not `activeElapsedSec`: while composing, the bar's clock
+// is the draft's, and a draft has no elapsed time. Reading the active timer's
+// here kept its digits counting under a play button after "Add a timer".
+const clock = computed(() => formatClock(timer.currentElapsedSec))
 
 // ── Add a timer ────────────────────────────────────────────────────────────
 // A toggle rather than a one-way action: pressed = the bar is describing a new
@@ -133,8 +133,15 @@ const addTitle = computed(() =>
 )
 
 function toggleCompose() {
-  if (timer.composing) timer.cancelCompose()
-  else timer.compose()
+  if (timer.composing) {
+    timer.cancelCompose()
+    return
+  }
+  timer.compose()
+  // The whole point of the press is to type a description — put the cursor
+  // there. (The store has already opened the running list, so the timer that
+  // just left the bar is right below.)
+  nextTick(() => inputEl.value?.focus())
 }
 
 function capToast(err: unknown) {
@@ -155,11 +162,9 @@ async function toggle() {
   try {
     if (timer.composing) {
       timer.setName(nameLocal.value, null)
-      const started = await timer.start()
-      // A pin can be holding the bar on a different timer, in which case the
-      // one just started is nowhere on screen. Open the list so it lands
-      // somewhere visible instead of seeming not to have started.
-      if (timer.activeTimer?.entryId !== started.entryId) listOpen.value = true
+      // The store opens the list itself when this start bumps a timer out of
+      // the bar (the previous newest, or this one when a pin holds the bar).
+      await timer.start()
     } else {
       flushName()
       const dto = await timer.stop()
@@ -189,6 +194,7 @@ async function toggle() {
     <div class="flex items-center gap-2 rounded-lg border border-default bg-elevated py-1.5 pr-1.5 pl-3.5 shadow-sm has-[>input:focus-visible]:border-primary has-[>input:focus-visible]:ring-1 has-[>input:focus-visible]:ring-primary">
       <!-- Description -->
       <input
+        ref="inputEl"
         :value="nameLocal"
         type="text"
         placeholder="What are you working on?"
@@ -233,15 +239,15 @@ async function toggle() {
         trailing-icon="i-lucide-chevron-down"
         color="neutral"
         variant="outline"
-        :aria-expanded="listOpen"
+        :aria-expanded="timer.listOpen"
         :aria-controls="LIST_ID"
-        :title="listOpen ? 'Hide the running timers' : 'Show the running timers'"
+        :title="timer.listOpen ? 'Hide the running timers' : 'Show the running timers'"
         class="h-[34px] shrink-0 gap-1.5 px-2.5 text-[13px]"
         :ui="{
           leadingIcon: 'size-3.5',
-          trailingIcon: `size-3 transition-transform ${listOpen ? 'rotate-180' : ''}`
+          trailingIcon: `size-3 transition-transform ${timer.listOpen ? 'rotate-180' : ''}`
         }"
-        @click="listOpen = !listOpen"
+        @click="timer.toggleList()"
       >
         <span class="whitespace-nowrap"><span class="tnum">{{ timer.count }}</span> running</span>
       </UButton>
@@ -325,7 +331,7 @@ async function toggle() {
     <!-- Running list: a disclosure inside the same sticky region, so the bar's
          resting height is untouched and only an opened list adds any. -->
     <div
-      v-if="listOpen && timer.count >= 1"
+      v-if="timer.listOpen && timer.count >= 1"
       class="tick-rise mt-1.5 max-h-[min(50vh,340px)] overflow-y-auto rounded-lg border border-default bg-elevated p-1 shadow-sm"
     >
       <ShellTimerList :list-id="LIST_ID" />

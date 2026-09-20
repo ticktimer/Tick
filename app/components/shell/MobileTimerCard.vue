@@ -22,11 +22,7 @@ const toast = useToast()
  *  (one of the two is CSS-hidden) and the two ids must not collide. */
 const LIST_ID = 'timer-list-mobile'
 
-const listOpen = ref(false)
-
-watch(() => timer.count, (n) => {
-  if (n === 0) listOpen.value = false
-})
+const inputEl = ref<HTMLInputElement | null>(null)
 
 // ── Description input (debounced while running, same as TimerBar) ──────────
 const nameLocal = ref(timer.currentName)
@@ -129,7 +125,9 @@ function pickerTarget(): string | null {
 }
 
 // ── Clock — derived from the store's single shared `nowMs` ─────────────────
-const clock = computed(() => formatClock(timer.activeElapsedSec))
+// `currentElapsedSec`: 00:00:00 while composing — the draft has no elapsed
+// time, and the bumped timer's digits must not keep counting under a play button.
+const clock = computed(() => formatClock(timer.currentElapsedSec))
 
 // ── Add a timer ────────────────────────────────────────────────────────────
 const capReached = computed(() => timer.atCap && !timer.composing)
@@ -139,8 +137,12 @@ const addTitle = computed(() =>
 )
 
 function toggleCompose() {
-  if (timer.composing) timer.cancelCompose()
-  else timer.compose()
+  if (timer.composing) {
+    timer.cancelCompose()
+    return
+  }
+  timer.compose() // also opens the running list, so the bumped timer stays in view
+  nextTick(() => inputEl.value?.focus())
 }
 
 function capToast(err: unknown) {
@@ -161,10 +163,7 @@ async function toggle() {
   try {
     if (timer.composing) {
       timer.setName(nameLocal.value, null)
-      const started = await timer.start()
-      // A pin can be holding the card on a different timer — show the list so
-      // the one just started lands somewhere visible.
-      if (timer.activeTimer?.entryId !== started.entryId) listOpen.value = true
+      await timer.start() // the store opens the list when this bumps a timer out of the card
     } else {
       flushName()
       const dto = await timer.stop()
@@ -192,7 +191,7 @@ async function toggle() {
     <!-- Running list: an overlay ABOVE the dock, never a row inside it — the
          layout reserves a fixed 150px for this card and that must not move. -->
     <div
-      v-if="listOpen && timer.count >= 1"
+      v-if="timer.listOpen && timer.count >= 1"
       class="tick-rise absolute inset-x-0 bottom-full z-10 mb-2 max-h-[min(50vh,300px)] overflow-y-auto rounded-xl bg-default p-1 ring-1 ring-default ring-inset dark:bg-elevated"
       :style="{ boxShadow: listShadow }"
     >
@@ -202,6 +201,7 @@ async function toggle() {
     <!-- Row 1: description · clock · start/stop -->
     <div class="flex items-center gap-2">
       <input
+        ref="inputEl"
         :value="nameLocal"
         type="text"
         placeholder="What are you working on?"
@@ -248,14 +248,14 @@ async function toggle() {
         color="neutral"
         variant="outline"
         :aria-label="countLabel"
-        :aria-expanded="listOpen"
+        :aria-expanded="timer.listOpen"
         :aria-controls="LIST_ID"
         class="relative h-[30px] shrink-0 gap-1 px-1.5 text-[11px] after:absolute after:-inset-1.5 after:content-['']"
         :ui="{
           leadingIcon: 'size-3',
-          trailingIcon: `size-3 transition-transform ${listOpen ? 'rotate-180' : ''}`
+          trailingIcon: `size-3 transition-transform ${timer.listOpen ? 'rotate-180' : ''}`
         }"
-        @click="listOpen = !listOpen"
+        @click="timer.toggleList()"
       >
         <span class="tnum">{{ timer.count }}</span>
       </UButton>

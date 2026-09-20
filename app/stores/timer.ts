@@ -117,6 +117,34 @@ export const useTimerStore = defineStore('timer', () => {
     }
   }
 
+  // ── Running list disclosure ────────────────────────────────────────────────
+  // Store state, not a ref in each bar: the desktop bar and the mobile dock
+  // each mount a list (one is CSS-hidden) and must agree, and the moments that
+  // should open it are not all button clicks in a bar. The rule is one
+  // sentence — whenever a timer is about to leave the bar, open the list so it
+  // lands somewhere visible. That happens on compose() and on any start while
+  // something already runs, including a ▶ on an entry row or a calendar block.
+  // With the list closed, the first timer simply looked like it had vanished
+  // the moment "Add a timer" was pressed.
+  const listOpen = ref(false)
+
+  function openList() {
+    listOpen.value = true
+  }
+
+  function closeList() {
+    listOpen.value = false
+  }
+
+  function toggleList() {
+    listOpen.value = !listOpen.value
+  }
+
+  // Nothing left to disclose — never leave an empty panel pinned open.
+  watch(() => timers.value.length, (n) => {
+    if (n === 0) listOpen.value = false
+  })
+
   // ── Composer ───────────────────────────────────────────────────────────────
   // `composing` is derived rather than plain state so "forced true whenever
   // nothing runs" is structural: there is no reachable state where the bar
@@ -126,6 +154,8 @@ export const useTimerStore = defineStore('timer', () => {
 
   function compose() {
     composingRaw.value = true
+    // The running timer is leaving the bar for the list.
+    listOpen.value = true
   }
 
   function cancelCompose() {
@@ -160,6 +190,15 @@ export const useTimerStore = defineStore('timer', () => {
   }
 
   const activeElapsedSec = computed(() => activeTimer.value ? elapsedOf(activeTimer.value) : 0)
+
+  /**
+   * The clock the bar shows — the active timer's, or 00:00:00 while composing.
+   * The bars used to read `activeElapsedSec` directly, so in compose mode the
+   * digits kept counting the timer that had just left the bar: dimmed, with a
+   * play button beside them, and it read as "a new timer started on its own,
+   * already at 00:04:12". Nothing had started. The draft has no elapsed time.
+   */
+  const currentElapsedSec = computed(() => composing.value ? 0 : activeElapsedSec.value)
 
   /** Every running timer added together — what "Today" on the dashboard adds. */
   const totalElapsedSec = computed(() => timers.value.reduce((acc, t) => acc + elapsedOf(t), 0))
@@ -315,11 +354,16 @@ export const useTimerStore = defineStore('timer', () => {
       body.refType = src.refType
       body.refId = src.refId
     }
+    // Whether this start bumps a timer out of the bar (the previous newest, or
+    // the one just started when a pin holds the bar). Either way something is
+    // about to be on screen only in the list — open it.
+    const bumped = timers.value.length > 0
     const created = await $fetch<TimerState>('/api/timers', { method: 'POST', body })
     timers.value = [...timers.value.filter(t => t.entryId !== created.entryId), created]
     sortTimers()
     composingRaw.value = false
     clearDraft() // consumed — the running timer is now the source of truth
+    if (bumped) listOpen.value = true
     syncTicking()
     return created
   }
@@ -461,6 +505,11 @@ export const useTimerStore = defineStore('timer', () => {
     activeTimer,
     elapsedFor,
     activeElapsedSec,
+    currentElapsedSec,
+    listOpen,
+    openList,
+    closeList,
+    toggleList,
     totalElapsedSec,
     currentRef,
     currentName,

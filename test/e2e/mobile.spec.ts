@@ -133,7 +133,8 @@ test.describe('mobile shell', { tag: '@mobile' }, () => {
     await timerToggle(page).click()
     await expect(timerToggle(page)).toHaveAccessibleName('Stop')
 
-    await timerCount(page).click()
+    // The list opened by itself when the first timer left the card.
+    await expect(timerCount(page)).toHaveAttribute('aria-expanded', 'true')
     await expect(timerListRow(page, TIMER_NAME)).toBeVisible()
     await expect(timerListRow(page, second)).toBeVisible()
 
