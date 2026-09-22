@@ -6,6 +6,26 @@ useSeoMeta({
   description: 'Tick is a self-hosted, MIT-licensed time tracker for freelancers and small teams.'
 })
 
+defineOgImageComponent('Tick', {
+  title: 'Self-hosted time tracking',
+  description: 'A fast timer, a better entries list, safer deletion and a real theme editor.'
+})
+
+// The landing page is what search engines treat as the project's entry, so the
+// software itself is described here rather than on any guide page. Free and
+// self-hosted, hence offer price 0 — the alternative is omitting `offers`, which
+// loses the "free" signal entirely.
+useSchemaOrg([
+  defineSoftwareApp({
+    name: 'Tick',
+    description: 'Self-hosted, MIT-licensed time tracking for freelancers and small teams.',
+    applicationCategory: 'BusinessApplication',
+    operatingSystem: 'Docker, Linux, macOS, Windows',
+    license: 'https://opensource.org/licenses/MIT',
+    offers: { '@type': 'Offer', price: 0, priceCurrency: 'USD' }
+  })
+])
+
 const quickstart = `git clone https://github.com/ticktimer/Tick.git tick && cd tick
 cp .env.example .env          # set NUXT_SESSION_PASSWORD: openssl rand -base64 36
 docker compose up -d          # app + Postgres on :3000`

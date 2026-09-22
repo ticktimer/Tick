@@ -32,3 +32,15 @@
 # for it (confirmed: `netlify build --dry` warns "the same header is set
 # twice with different cases for /_nuxt/*"), and add nothing for the
 # already-covered hashed assets.
+
+# The one header rule worth adding by hand. Generated social cards land in
+# /_og/ with the template props encoded in the filename (or hashed into it when
+# that name would get too long), so a card is content-addressed the same way a
+# hashed /_nuxt/ asset is — change the title and the URL changes with it. Nitro
+# writes no rule for this path, so unlike a `/_nuxt/*` rule here there is
+# nothing to conflict with; without it the cards inherit Netlify's default
+# must-revalidate and every crawler re-fetches them.
+[[headers]]
+  for = "/_og/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

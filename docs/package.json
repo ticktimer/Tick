@@ -12,8 +12,11 @@
   "dependencies": {
     "@nuxt/content": "^3.9.0",
     "@nuxt/ui": "^4.11.1",
+    "@nuxtjs/seo": "^5.3.16",
+    "@resvg/resvg-js": "^2.6.2",
     "better-sqlite3": "^13.0.3",
     "nuxt": "^4.5.2",
+    "satori": "^0.33.5",
     "vue": "^3.5.43",
     "vue-router": "^5.3.1"
   },
