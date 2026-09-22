@@ -61,7 +61,11 @@ export default defineNuxtConfig({
   app: {
     head: {
       title: 'Tick docs',
-      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }]
+      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
+      // Discord tints an embed's left accent stripe from this; without it the
+      // stripe is grey against a violet card. Same violet the card and the
+      // site's primary use (Nuxt UI violet-500).
+      meta: [{ name: 'theme-color', content: '#8b5cf6' }]
     }
   }
 })
