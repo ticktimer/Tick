@@ -3,8 +3,20 @@
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: false },
-  modules: ['@nuxt/ui', '@nuxt/content'],
+  modules: ['@nuxt/ui', '@nuxt/content', '@nuxtjs/seo'],
   css: ['~/assets/css/main.css'],
+
+  // Canonical origin for canonical links, og:url, robots.txt and sitemap.xml.
+  // Hardcoded rather than left to nuxt-site-config's Netlify env detection:
+  // that reads $URL/$DEPLOY_PRIME_URL, so a deploy preview would advertise its
+  // own ephemeral host as canonical. Previews are noindex'd by Netlify anyway,
+  // and pointing their canonical at production is the behaviour we want.
+  site: {
+    url: 'https://ticktimerapp.netlify.app',
+    name: 'Tick docs',
+    description: 'Tick is a self-hosted, MIT-licensed time tracker for freelancers and small teams.'
+  },
+
   colorMode: {
     preference: 'dark',
     fallback: 'dark',
@@ -21,6 +33,18 @@ export default defineNuxtConfig({
     // api.iconify.design at runtime — an avoidable external request.
     clientBundle: { scan: true }
   },
+
+  ogImage: {
+    // Every route is prerendered, so each card is rendered at build time and
+    // written to dist. zeroRuntime drops the satori/resvg runtime from the
+    // bundle — a static host has nothing to render on demand anyway.
+    zeroRuntime: true
+  },
+
+  // Dev-only crawler. It walks prose links and warns on 404s/redirects; noisy
+  // enough during content edits that it stays off until deliberately run.
+  linkChecker: { enabled: false },
+
   nitro: {
     prerender: {
       // Without this, Nitro writes about/index.html; Netlify's Pretty URLs
