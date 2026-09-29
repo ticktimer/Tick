@@ -1,6 +1,8 @@
 <script setup lang="ts">
-// Manual entry dialog (560px). Free-text Date / Start / End / or Duration with
-// a live interpretation line; picker-trigger styled as an input; billable
+// Manual entry dialog (560px). Free-text Start date / Start / End date / End /
+// or Duration read by interpretEntry() into a live interpretation line (a blank
+// End date means the start day; a later one carries the entry past midnight);
+// picker-trigger styled as an input; billable
 // toggle showing the client-side rate estimate (server re-resolves per Rule 2).
 // Submits via entriesStore.addManual — the saved entry sorts into its day group.
 // Doubles as "Edit entry" when ui.editEntry is set: opens prefilled and saves
@@ -28,6 +30,7 @@ const billable = ref(true)
 const dateInput = ref('')
 const startInput = ref('')
 const endInput = ref('')
+const endDateInput = ref('')
 const durInput = ref('')
 const tagsInput = ref('')
 const saving = ref(false)
@@ -56,6 +59,8 @@ watch(() => ui.manualOpen, (v) => {
   dateInput.value = e ? toDateInput(e.start) : ''
   startInput.value = e ? formatTime(e.start) : ''
   endInput.value = e?.end ? formatTime(e.end) : ''
+  // Only an entry that ends on a later day shows its end date; blank = same day
+  endDateInput.value = e?.end && toDateInput(e.end) !== toDateInput(e.start) ? toDateInput(e.end) : ''
   durInput.value = ''
   tagsInput.value = e ? e.tags.join(', ') : ''
   saving.value = false
@@ -102,42 +107,14 @@ const rateLabel = computed(() => {
   return resolvedRate.value != null ? `$${resolvedRate.value}/h` : 'Billable'
 })
 
-interface Parsed {
-  valid: boolean
-  text: string
-  start?: Date
-  end?: Date
-}
-
-/** Live interpretation of Date / Start / End / Duration (empty date = today). */
-const parsed = computed<Parsed>(() => {
-  const d = parseDate(dateInput.value)
-  if (!d) return { valid: false, text: `Couldn't read “${dateInput.value.trim()}” as a date.` }
-
-  const dateStr = formatDateLong(d)
-  const start = parseTime(startInput.value)
-  const end = parseTime(endInput.value)
-  const dur = parseDuration(durInput.value)
-  const at = (minutes: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, minutes)
-
-  if (start != null && end != null && end > start) {
-    const s = at(start)
-    const e = at(end)
-    return { valid: true, start: s, end: e, text: `${dateStr} · ${formatRange(s, e)} · ${formatDuration((end - start) * 60)}` }
-  }
-  if (dur != null && dur > 0 && start != null) {
-    const s = at(start)
-    const e = at(start + dur)
-    return { valid: true, start: s, end: e, text: `${dateStr} · ${formatRange(s, e)} · ${formatDuration(dur * 60)}` }
-  }
-  if (dur != null && dur > 0) {
-    const s = at(9 * 60)
-    const e = at(9 * 60 + dur)
-    return { valid: true, start: s, end: e, text: `${dateStr} · ${formatDuration(dur * 60)} (no start time — logged from 9:00)` }
-  }
-  if (start != null && end != null) return { valid: false, text: `${dateStr} · end must be after start.` }
-  return { valid: false, text: `${dateStr} · add a start + end, or a duration.` }
-})
+/** Live interpretation of the date/time fields (blank date = today, blank end date = same day). */
+const parsed = computed(() => interpretEntry({
+  date: dateInput.value,
+  endDate: endDateInput.value,
+  start: startInput.value,
+  end: endInput.value,
+  duration: durInput.value
+}))
 
 const tags = computed(() =>
   tagsInput.value
@@ -259,18 +236,24 @@ function onOpenAutoFocus(e: Event) {
           </UButton>
         </div>
 
-        <!-- Date / Start / End / or Duration — 2×2 <640px, one row above -->
-        <div class="grid grid-cols-3 gap-2.5 sm:grid-cols-[minmax(0,1.3fr)_1fr_1fr_1fr]">
-          <UFormField label="Date — type it any way" class="col-span-3 sm:col-span-1">
+        <!-- Start date / Start over End date / End / or Duration — the end
+             date stays blank for a same-day entry; ≥640px the duration sits
+             beside End, below it takes its own full row -->
+        <div class="grid grid-cols-2 gap-2.5 sm:grid-cols-[minmax(0,1.3fr)_1fr_1fr]">
+          <UFormField label="Start date — type it any way">
             <UInput v-model="dateInput" :aria-describedby="interpId" placeholder="2025-03-14, mar 14, last tue…" class="tnum w-full" />
           </UFormField>
           <UFormField label="Start">
             <UInput v-model="startInput" :aria-describedby="interpId" placeholder="9:00" class="tnum w-full" />
           </UFormField>
+          <div class="hidden sm:block" aria-hidden="true" />
+          <UFormField label="End date">
+            <UInput v-model="endDateInput" :aria-describedby="interpId" placeholder="same day" class="tnum w-full" />
+          </UFormField>
           <UFormField label="End">
             <UInput v-model="endInput" :aria-describedby="interpId" placeholder="11:30" class="tnum w-full" />
           </UFormField>
-          <UFormField label="or Duration">
+          <UFormField label="or Duration" class="col-span-2 sm:col-span-1">
             <UInput v-model="durInput" :aria-describedby="interpId" placeholder="2h 30m" class="tnum w-full" />
           </UFormField>
         </div>

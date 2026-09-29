@@ -55,13 +55,20 @@ export function formatTime(d: Date | string | number, tz?: string): string {
   return `${h}:${String(m).padStart(2, '0')}${ap}`
 }
 
-/** "9:05am – 11:20am". */
+/**
+ * "9:05am – 11:20am". An end on a later calendar day (in `tz`) is marked with
+ * the day count, "11:30pm – 1:15am +1", so a cross-midnight entry doesn't read
+ * as ending before it started.
+ */
 export function formatRange(
   start: Date | string | number,
   end: Date | string | number,
   tz?: string
 ): string {
-  return `${formatTime(start, tz)} – ${formatTime(end, tz)}`
+  const s = inZone(start, tz)
+  const e = inZone(end, tz)
+  const days = Math.round((startOfDay(e).getTime() - startOfDay(s).getTime()) / DAY_MS)
+  return `${formatTime(s)} – ${formatTime(e)}${days > 0 ? ` +${days}` : ''}`
 }
 
 /** "$3,699" — rounded to whole dollars. */

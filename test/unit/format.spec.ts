@@ -117,6 +117,21 @@ describe('formatTime / formatRange', () => {
     expect(formatRange(new Date(2026, 2, 14, 9, 5), new Date(2026, 2, 14, 11, 20))).toBe('9:05am – 11:20am')
     expect(formatRange(new Date(2026, 2, 14, 13, 0), new Date(2026, 2, 14, 14, 45))).toBe('1:00pm – 2:45pm')
   })
+
+  it('marks an end on a later day with the day count', () => {
+    expect(formatRange(new Date(2026, 2, 14, 23, 30), new Date(2026, 2, 15, 1, 15))).toBe('11:30pm – 1:15am +1')
+    expect(formatRange(new Date(2026, 2, 14, 23, 30), new Date(2026, 2, 16, 0, 5))).toBe('11:30pm – 12:05am +2')
+    // Ending at exactly midnight is already the next day
+    expect(formatRange(new Date(2026, 2, 14, 22, 0), new Date(2026, 2, 15, 0, 0))).toBe('10:00pm – 12:00am +1')
+  })
+
+  it('counts the days in the given zone, not the runtime one', () => {
+    // 23:30 → 01:15 in Denver crosses midnight there; UTC clock reads 05:30 → 07:15 the next day
+    const start = Date.UTC(2026, 2, 15, 5, 30)
+    const end = Date.UTC(2026, 2, 15, 7, 15)
+    expect(formatRange(start, end, 'America/Denver')).toBe('11:30pm – 1:15am +1')
+    expect(formatRange(start, end, 'UTC')).toBe('5:30am – 7:15am')
+  })
 })
 
 describe('formatDayLabel', () => {
