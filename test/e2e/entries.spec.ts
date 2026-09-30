@@ -41,7 +41,7 @@ test('a manual entry dated "yesterday" lands in the Yesterday group', async ({ p
   await expect(dialog).toBeVisible()
 
   await dialog.getByLabel('What did you work on?').fill(entryName)
-  await dialog.getByLabel('Date — type it any way').fill('yesterday')
+  await dialog.getByLabel('Start date — type it any way').fill('yesterday')
   await dialog.getByLabel('Start', { exact: true }).fill('9:00')
   await dialog.getByLabel('End', { exact: true }).fill('10:30')
   // The interpretation line proves the free-text date parsed before we save.
@@ -80,6 +80,49 @@ test('editing an entry updates its row', async ({ page, api }) => {
   await expect(entryRow(today, after)).toBeVisible()
   await expect(entryRow(today, after)).toContainText('3:00am – 4:00am')
   await expect(entryRow(today, before)).toHaveCount(0)
+})
+
+test('an entry that ran past midnight edits with its end date and shows the day marker', async ({ page, api }) => {
+  const entryName = name('E2E midnight')
+  // 11:30pm yesterday → 12:15am today, local time — the shape a timer left
+  // running past midnight leaves behind (ticktimer/Tick#54).
+  const now = new Date()
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 30)
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 15)
+  const isoDay = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  await createEntry(api, { name: entryName, billable: true, start: start.toISOString(), end: end.toISOString() })
+
+  await page.goto('/time')
+  // Grouped under the day it started; the range says it ended the next day.
+  const row = entryRow(group(page, 'Yesterday'), entryName)
+  await expect(row).toBeVisible()
+  await expect(row).toContainText('11:30pm – 12:15am +1')
+
+  await row.getByRole('button', { name: entryName, exact: true }).click()
+  const dialog = page.getByRole('dialog').filter({
+    has: page.getByRole('heading', { name: 'Edit entry' })
+  })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByLabel('Start date — type it any way')).toHaveValue(isoDay(start))
+  await expect(dialog.getByLabel('End date')).toHaveValue(isoDay(end))
+  await expect(dialog.getByLabel('Start', { exact: true })).toHaveValue('11:30pm')
+  await expect(dialog.getByLabel('End', { exact: true })).toHaveValue('12:15am')
+  await expect(dialog.getByText(/11:30pm – 12:15am \+1/)).toBeVisible()
+
+  // Clearing the end date makes 12:15am land before 11:30pm — and says why
+  await dialog.getByLabel('End date').fill('')
+  await expect(dialog.getByText(/end must be after start — add an End date to cross midnight/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+  await dialog.getByLabel('End date').fill(isoDay(end))
+  await dialog.getByLabel('End', { exact: true }).fill('1:00')
+  await expect(dialog.getByText(/11:30pm – 1:00am \+1 · 1h 30m/)).toBeVisible()
+  await dialog.getByRole('button', { name: 'Save' }).click()
+  await expect(dialog).toBeHidden()
+
+  await expect(row).toContainText('11:30pm – 1:00am +1')
+  await expect(row).toContainText('1h 30m')
 })
 
 test('deleting an entry shows the undo toast and undo restores the row', async ({ page, api }) => {
