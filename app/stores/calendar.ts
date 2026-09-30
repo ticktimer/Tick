@@ -82,12 +82,24 @@ export const useCalendarStore = defineStore('calendar', () => {
     view.value = v
   }
 
-  /** GET /api/entries for the visible range (running + trashed excluded server-side). */
+  /** Does an entry touch the visible range? Its tail counts even when it started before. */
+  function inRange(dto: EntryDto): boolean {
+    const start = new Date(dto.start).getTime()
+    const end = new Date(dto.end ?? dto.start).getTime()
+    return start < rangeEnd.value && end > rangeStart.value
+  }
+
+  /**
+   * GET /api/entries for the visible range (running + trashed excluded
+   * server-side). `overlap` brings in entries that started before the range
+   * and end inside it — the tail of one that ran past midnight is drawn on
+   * the day it ended.
+   */
   async function fetchRange() {
     loading.value = true
     try {
       entries.value = await requestFetch<EntryDto[]>('/api/entries', {
-        query: { from: new Date(rangeStart.value).toISOString(), to: new Date(rangeEnd.value).toISOString() }
+        query: { from: new Date(rangeStart.value).toISOString(), to: new Date(rangeEnd.value).toISOString(), overlap: '1' }
       })
     } finally {
       loading.value = false
@@ -105,9 +117,7 @@ export const useCalendarStore = defineStore('calendar', () => {
     tags?: string[]
   }) {
     const dto = await $fetch<EntryDto>('/api/entries', { method: 'POST', body: payload })
-    if (new Date(dto.start).getTime() < rangeEnd.value && new Date(dto.start).getTime() >= rangeStart.value) {
-      entries.value.push(dto)
-    }
+    if (inRange(dto)) entries.value.push(dto)
     return dto
   }
 

@@ -143,6 +143,21 @@ describe('GET /api/entries', () => {
     }
   })
 
+  it('overlap=1 also returns rows that started before the range but end inside it', async () => {
+    const dayBefore = (h: number, m = 0) => new Date(2026, 1, 9, h, m, 0, 0).toISOString()
+    const crossing = await create({ name: 'crossing', start: dayBefore(23, 30), end: at(0, 15) })
+    const inside = await create({ name: 'inside', start: at(9), end: at(10) })
+    // Ends exactly where the range starts: touches nothing inside it
+    await create({ name: 'ends at range start', start: dayBefore(22), end: FROM })
+    await create({ name: 'other day', start: OTHER_DAY, end: OTHER_DAY_END })
+
+    expect((await listRange()).map(r => r.name)).toEqual(['inside'])
+
+    const res = await api.get(`/api/entries?from=${FROM}&to=${TO}&overlap=1`)
+    expect(res.status).toBe(200)
+    expect(res.body.map((r: any) => r.id)).toEqual([inside.id, crossing.id]) // desc by start
+  })
+
   it('400s a missing or unparseable range', async () => {
     expect((await api.get('/api/entries')).status).toBe(400)
     const bad = await api.get('/api/entries?from=nonsense&to=alsonot')
