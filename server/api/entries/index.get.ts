@@ -1,5 +1,8 @@
 // GET /api/entries?from=ISO&to=ISO — the session user's entries in range,
-// newest first. Excludes the running timer and trashed rows.
+// newest first. Excludes the running timer and trashed rows. By default an
+// entry is in range when it STARTS inside it (the Time page's day groups);
+// `overlap=1` also returns entries that started earlier but end inside it,
+// which is how the calendar gets the tail of an entry that ran past midnight.
 import { z } from 'zod'
 
 const isoDate = z
@@ -7,11 +10,15 @@ const isoDate = z
   .transform(s => new Date(s))
   .refine(d => Number.isFinite(d.getTime()), { message: 'Invalid date' })
 
-const querySchema = z.object({ from: isoDate, to: isoDate })
+const querySchema = z.object({
+  from: isoDate,
+  to: isoDate,
+  overlap: z.enum(['1', 'true']).optional()
+})
 
 export default defineEventHandler(async (event): Promise<EntryDto[]> => {
   const user = await requireAuth(event)
-  const { from, to } = getSanitizedQuery(event, querySchema)
+  const { from, to, overlap } = getSanitizedQuery(event, querySchema)
   const db = useDrizzle()
 
   const e = schema.timeEntries
@@ -35,8 +42,9 @@ export default defineEventHandler(async (event): Promise<EntryDto[]> => {
         eq(schema.timeEntries.userId, user.id),
         isNull(schema.timeEntries.deletedAt),
         isNotNull(schema.timeEntries.end),
-        gte(schema.timeEntries.start, from),
-        lte(schema.timeEntries.start, to)
+        overlap
+          ? and(lt(schema.timeEntries.start, to), gt(schema.timeEntries.end, from))
+          : and(gte(schema.timeEntries.start, from), lte(schema.timeEntries.start, to))
       )
     )
     .orderBy(desc(schema.timeEntries.start))

@@ -9,6 +9,8 @@ import { SEED, startsWith, uniqueName } from './helpers/fixtures'
 const BLOCK = uniqueName('E2E block')
 /** 4–6pm today: overlaps BLOCK by an hour, so the two must share the column. */
 const OVERLAP = uniqueName('E2E overlap')
+/** 11pm yesterday → 1:30am today: drawn in two columns (ticktimer/Tick#56). */
+const MIDNIGHT = uniqueName('E2E midnight')
 
 /** Names this file starts through the UI, swept in afterEach alongside BLOCK. */
 const running: string[] = []
@@ -60,7 +62,7 @@ test.beforeEach(async ({ api }) => {
 
 test.afterEach(async ({ api }) => {
   await stopAllTimers(api)
-  await deleteEntriesNamed(api, BLOCK, OVERLAP, ...running)
+  await deleteEntriesNamed(api, BLOCK, OVERLAP, MIDNIGHT, ...running)
   running.length = 0
 })
 
@@ -503,4 +505,42 @@ test('deleting from a fold\'s row lands focus on the page, not on <body>', async
   // <main>, the same landing the picker uses — never to <body>.
   await expect(calendarBlock(page, OVERLAP)).toBeVisible()
   await expect(page.locator('#main')).toBeFocused()
+})
+
+// ── ticktimer/Tick#56 ───────────────────────────────────────────────────────
+test('an entry that ran past midnight is drawn on both days: a tail from midnight and a head cut at the bottom', async ({ page, api }) => {
+  const now = new Date()
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 0)
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 1, 30)
+  const isoDay = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  await createEntry(api, { name: MIDNIGHT, billable: true, start: start.toISOString(), end: end.toISOString() })
+
+  await page.goto('/calendar')
+  await openDayView(page)
+
+  // Today's column holds the tail: the whole entry's range in its name, cut at
+  // the top — and the hour window opened at midnight to fit it (base is 7am).
+  const tail = block(page, MIDNIGHT)
+  await expect(tail).toBeVisible()
+  await expect(tail).toHaveAccessibleName(/11:00pm – 1:30am \+1 · 2h 30m · started before midnight/)
+  await expect(tail).toHaveCSS('border-top-style', 'dashed')
+  await expect(page.getByText('12am', { exact: true }).first()).toBeVisible()
+
+  // Yesterday's column holds the head, cut at the bottom. Same entry: clicking
+  // it opens the edit dialog with the end on the next day.
+  await page.getByRole('button', { name: 'Previous day' }).click()
+  await waitForLanesMeasured(page)
+  const head = block(page, MIDNIGHT)
+  await expect(head).toBeVisible()
+  await expect(head).toHaveAccessibleName(/11:00pm – 1:30am \+1 · 2h 30m · continues after midnight/)
+  await expect(head).toHaveCSS('border-bottom-style', 'dashed')
+
+  await head.click()
+  const dialog = page.getByRole('dialog').filter({
+    has: page.getByRole('heading', { name: 'Edit entry' })
+  })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByLabel('End', { exact: true })).toHaveValue('1:30am')
+  await expect(dialog.getByLabel('End date')).toHaveValue(isoDay(end))
 })

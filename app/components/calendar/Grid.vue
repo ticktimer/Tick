@@ -17,9 +17,12 @@
 // ended, running, or one of each — share the column in lanes, and a cluster
 // whose lanes would be too narrow to carry a name beside its ▶ folds into ONE
 // block that lists its members; clicking it discloses them ("Lanes and folds"
-// below).
+// below). An entry that ran past midnight is drawn once per day column it
+// touches — a head cut at the bottom, a tail cut at the top (see
+// app/utils/calendar-segments.ts); only the head moves or resizes.
 import type { EntryDto, TimerState } from '#shared/types'
 import type { Fold, FoldMember } from '~/utils/calendar-fold'
+import type { DaySegment } from '~/utils/calendar-segments'
 import { MAX_RUNNING_TIMERS } from '#shared/utils/timers'
 
 const HOUR_PX = 48
@@ -71,17 +74,26 @@ function dayStartOf(t: number): number {
   return startOfDayInstant(t, timeZone.value)
 }
 
+/** Where each visible column ends: the next midnight, 23–25h on, in the user's zone. */
+const dayEnds = computed(() => calendar.days.map(d => addDaysInstant(d, timeZone.value, 1)))
+
+/** The day columns an entry (or timer) is drawn in, and its minutes within each. */
+function segmentsOf(startTs: number, endTs: number): DaySegment[] {
+  return splitAcrossDays(startTs, endTs, calendar.days, dayEnds.value)
+}
+
 const cols = computed(() => `52px repeat(${calendar.dayCount}, minmax(0, 1fr))`)
 
 // ── Visible hour window: 7am–7pm, stretched to cover out-of-range entries ───
 const hourBounds = computed(() => {
   let h0 = 7
   let h1 = 19
+  // A tail opens the window at midnight; a head cut there closes it at 24.
   const consider = (startTs: number, endTs: number) => {
-    const dayTs = dayStartOf(startTs)
-    if (!calendar.days.includes(dayTs)) return
-    h0 = Math.min(h0, Math.floor((startTs - dayTs) / 3_600_000))
-    h1 = Math.max(h1, Math.ceil(Math.min(endTs - dayTs, 86_400_000) / 3_600_000))
+    for (const seg of segmentsOf(startTs, endTs)) {
+      h0 = Math.min(h0, Math.floor(seg.startMin / 60))
+      h1 = Math.max(h1, Math.ceil(seg.endMin / 60))
+    }
   }
   for (const e of calendar.entries) {
     const s = new Date(e.start).getTime()
@@ -152,6 +164,11 @@ const drag = ref<DragState | null>(null)
 const suppressClick = ref(false)
 /** Entry id whose touch resize handles are showing (last long-pressed block). */
 const armedId = ref<string | null>(null)
+
+/** The armed entry's head shows the ring and handles; its tail never arms (it never drags). */
+function isArmed(b: Block): boolean {
+  return isCoarse.value && armedId.value === b.entry.id && !b.dragging && !b.cutTop
+}
 
 const snap = (m: number) => Math.round(m / SNAP) * SNAP
 const clampMin = (m: number) => Math.min(hourBounds.value.h1 * 60, Math.max(hourBounds.value.h0 * 60, m))
@@ -304,8 +321,16 @@ function entryMinutes(entry: EntryDto): { startMin: number, endMin: number } {
   return { startMin, endMin: Math.min(1440, startMin + entry.durationSec / 60) }
 }
 
-function onBlockDown(entry: EntryDto, dayIdx: number, e: PointerEvent) {
+function onBlockDown(b: Block, dayIdx: number, e: PointerEvent) {
   if (drag.value) return
+  // A tail is the head's continuation: it opens the entry on click but never
+  // drags — its top is midnight, not the start, and its column isn't the
+  // entry's day. Swallow the press so the column doesn't seed a create.
+  if (b.cutTop) {
+    e.stopPropagation()
+    return
+  }
+  const entry = b.entry
   if (e.pointerType === 'touch') {
     e.stopPropagation()
     const { clientX, clientY } = e
@@ -332,7 +357,10 @@ function onBlockDown(entry: EntryDto, dayIdx: number, e: PointerEvent) {
   e.stopPropagation()
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
   const rel = e.clientY - rect.top
-  const kind: DragKind = rel <= EDGE_PX ? 'resize-top' : rel >= rect.height - EDGE_PX ? 'resize-bottom' : 'move'
+  // A head cut at midnight has no end edge to grab: its bottom is the day's, not the entry's.
+  const kind: DragKind = rel <= EDGE_PX
+    ? 'resize-top'
+    : rel >= rect.height - EDGE_PX && !b.cutBottom ? 'resize-bottom' : 'move'
   const { startMin, endMin } = entryMinutes(entry)
   beginDrag({
     kind,
@@ -418,15 +446,21 @@ function onDragUp() {
   setTimeout(() => (suppressClick.value = false), 0)
   if (!d.moved) return
   const dayTs = calendar.days[d.dayIdx]!
+  const entryStart = new Date(d.entry.start).getTime()
+  const entryEnd = new Date(d.entry.end ?? d.entry.start).getTime()
   let start: number
   let end: number
   if (d.kind === 'move') {
     // Preserve the exact duration; only the (snapped) start moves
-    const durMs = new Date(d.entry.end ?? d.entry.start).getTime() - new Date(d.entry.start).getTime()
     start = dayTs + d.startMin * 60_000
-    end = start + durMs
+    end = start + (entryEnd - entryStart)
+  } else if (d.kind === 'resize-top') {
+    // The end is untouched — and past midnight it isn't on this column at all,
+    // so it must not be read back off the clamped block.
+    start = dayTs + d.startMin * 60_000
+    end = entryEnd
   } else {
-    start = dayTs + d.startMin * 60_000
+    start = entryStart
     end = dayTs + d.endMin * 60_000
   }
   calendar
@@ -477,10 +511,17 @@ async function startAgain(entry: EntryDto) {
 type Lane = ReturnType<typeof assignLanes>[number]
 
 interface Block {
+  /** `${entry.id}:${dayIdx}` — one entry can be drawn in several columns. */
   id: string
   entry: EntryDto
   top: number
   h: number
+  /** The segment's minutes within its column — what overlap is decided on. */
+  startMin: number
+  endMin: number
+  /** Continues from the previous day / into the next (drawn with a dashed cut). */
+  cutTop: boolean
+  cutBottom: boolean
   billable: boolean
   name: string
   sub: string
@@ -515,31 +556,39 @@ const dayBlocks = computed<Block[][]>(() => {
   for (const e of calendar.entries) {
     if (e.id === draggingId) continue
     const startTs = new Date(e.start).getTime()
-    const di = calendar.days.indexOf(dayStartOf(startTs))
-    if (di < 0) continue
-    const startMin = (startTs - dayStartOf(startTs)) / 60_000
-    const endMin = Math.min(1440, startMin + e.durationSec / 60)
-    byDay[di]!.push({
-      id: e.id,
-      entry: e,
-      top: topOf(startMin),
-      h: heightOf(startMin, endMin),
-      billable: e.billable,
-      name: e.name,
-      sub: subFor(e),
-      title: `${e.name} · ${formatRange(e.start, e.end ?? e.start, timeZone.value)} · ${formatDuration(e.durationSec)}`,
-      dragging: false
-    })
+    const title = `${e.name} · ${formatRange(e.start, e.end ?? e.start, timeZone.value)} · ${formatDuration(e.durationSec)}`
+    for (const seg of segmentsOf(startTs, startTs + e.durationSec * 1000)) {
+      byDay[seg.dayIdx]!.push({
+        id: `${e.id}:${seg.dayIdx}`,
+        entry: e,
+        top: topOf(seg.startMin),
+        h: heightOf(seg.startMin, seg.endMin),
+        startMin: seg.startMin,
+        endMin: seg.endMin,
+        cutTop: seg.cutTop,
+        cutBottom: seg.cutBottom,
+        billable: e.billable,
+        name: e.name,
+        sub: subFor(e),
+        title: title + (seg.cutBottom ? ' · continues after midnight' : seg.cutTop ? ' · started before midnight' : ''),
+        dragging: false
+      })
+    }
   }
 
-  // The block being moved/resized paints at its drag position
+  // The block being moved/resized paints at its drag position — on its start
+  // day only, clamped at midnight like the head it came from.
   if (d && draggingId && d.entry) {
     const dayTs = calendar.days[d.dayIdx]!
     byDay[d.dayIdx]!.push({
-      id: d.entry.id,
+      id: `${d.entry.id}:${d.dayIdx}`,
       entry: d.entry,
       top: topOf(d.startMin),
       h: heightOf(d.startMin, d.endMin),
+      startMin: d.startMin,
+      endMin: d.endMin,
+      cutTop: false,
+      cutBottom: d.endMin >= 1440,
       billable: d.entry.billable,
       name: d.entry.name,
       sub: formatRange(dayTs + d.startMin * 60_000, dayTs + d.endMin * 60_000, timeZone.value),
@@ -565,10 +614,15 @@ const ghost = computed(() => {
 
 /** Live blocks, one per running timer (non-draggable, each growing to now). */
 interface RunningBlock {
+  /** `${entryId}:${dayIdx}` — a timer that crossed midnight is drawn in two columns. */
   id: string
   dayIdx: number
   top: number
   h: number
+  startMin: number
+  endMin: number
+  cutTop: boolean
+  cutBottom: boolean
   billable: boolean
   name: string
   sub: string
@@ -576,29 +630,27 @@ interface RunningBlock {
   timer: TimerState
 }
 
-function runningBlockOf(t: TimerState): RunningBlock | null {
+function runningBlocksOf(t: TimerState): RunningBlock[] {
   const startTs = new Date(t.start).getTime()
-  const dayTs = dayStartOf(startTs)
-  const di = calendar.days.indexOf(dayTs)
-  if (di < 0) return null
-  const startMin = (startTs - dayTs) / 60_000
   const endTs = startTs + timer.elapsedFor(t.entryId) * 1000
-  const endMin = Math.min(1440, (endTs - dayTs) / 60_000)
-  return {
-    id: t.entryId,
+  const sub = `${formatTime(startTs, timeZone.value)} – now`
+  return segmentsOf(startTs, endTs).map(seg => ({
+    id: `${t.entryId}:${seg.dayIdx}`,
     timer: t,
-    dayIdx: di,
-    top: topOf(startMin),
-    h: heightOf(startMin, endMin),
+    dayIdx: seg.dayIdx,
+    top: topOf(seg.startMin),
+    h: heightOf(seg.startMin, seg.endMin),
+    startMin: seg.startMin,
+    endMin: seg.endMin,
+    cutTop: seg.cutTop,
+    cutBottom: seg.cutBottom,
     billable: t.billable,
     name: t.name || 'Untitled entry',
-    sub: `${formatTime(startTs, timeZone.value)} – now`
-  }
+    sub
+  }))
 }
 
-const runningBlocks = computed<RunningBlock[]>(() =>
-  timer.timers.map(runningBlockOf).filter((b): b is RunningBlock => b !== null)
-)
+const runningBlocks = computed<RunningBlock[]>(() => timer.timers.flatMap(runningBlocksOf))
 
 // ── Lanes and folds ─────────────────────────────────────────────────────────
 // Blocks that overlap in time share the column side by side (app/utils/lanes).
@@ -673,19 +725,17 @@ function foldMemberOf(it: LaneItem): { id: string, startTs: number, endTs: numbe
     id: it.id,
     startTs,
     endTs: now.value,
-    member: { kind: 'timer', id: it.id, name: it.name, sub: subFor(it.timer), range: it.sub, clientColor: it.timer.ref?.clientColor }
+    member: { kind: 'timer', id: it.timer.entryId, name: it.name, sub: subFor(it.timer), range: it.sub, clientColor: it.timer.ref?.clientColor }
   }
 }
 
 /**
- * An item's span in minutes of its day — what "overlap" means, independent of
- * the 22px floor a drawn block gets. A running timer ends at now.
+ * An item's span in minutes of its column — what "overlap" means, independent
+ * of the 22px floor a drawn block gets. A segment of an entry that crossed
+ * midnight spans only its own column's part.
  */
-function timeSpanOf(it: LaneItem, dayTs: number): { top: number, h: number } {
-  const startTs = 'entry' in it ? new Date(it.entry.start).getTime() : new Date(it.timer.start).getTime()
-  const endTs = 'entry' in it ? startTs + it.entry.durationSec * 1000 : now.value
-  const top = (startTs - dayTs) / 60_000
-  return { top, h: Math.max(1 / 60, Math.min(1440, (endTs - dayTs) / 60_000) - top) }
+function timeSpanOf(it: LaneItem): { top: number, h: number } {
+  return { top: it.startMin, h: Math.max(1 / 60, it.endMin - it.startMin) }
 }
 
 /**
@@ -734,7 +784,7 @@ const dayLayout = computed<DayLayout[]>(() => calendar.days.map((dayTs, di) => {
   // on the drawn geometry folded exactly those in Week view — and a folded
   // entry cannot be dragged or resized. Short neighbours still overlap by a
   // few pixels, as they did before any of this; they stay two blocks.
-  const spans = items.map(it => timeSpanOf(it, dayTs))
+  const spans = items.map(timeSpanOf)
   const lanes = assignLanes(spans)
   const laneById = new Map<string, Lane>()
   items.forEach((it, k) => laneById.set(it.id, lanes[k]!))
@@ -1084,8 +1134,10 @@ const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] afte
               :aria-label="b.title ? `${b.name} · ${d.wd} ${d.num}${b.title.slice(b.name.length)} · ${b.sub}` : undefined"
               class="absolute flex flex-col gap-px overflow-hidden rounded-sm py-1 pl-1.5 pr-7 text-left transition-[filter] hover:brightness-[1.12] focus-visible:z-10 focus-visible:outline-offset-1"
               :class="[
-                b.dragging ? `z-10 opacity-90 shadow-md ${drag?.kind === 'move' ? 'cursor-grabbing' : 'cursor-ns-resize'}` : 'cursor-grab',
-                isCoarse && armedId === b.id && !b.dragging ? 'ring ring-primary/60' : ''
+                b.dragging ? `z-10 opacity-90 shadow-md ${drag?.kind === 'move' ? 'cursor-grabbing' : 'cursor-ns-resize'}` : b.cutTop ? 'cursor-pointer' : 'cursor-grab',
+                isArmed(b) ? 'ring ring-primary/60' : '',
+                b.cutTop ? 'rounded-t-none' : '',
+                b.cutBottom ? 'rounded-b-none' : ''
               ]"
               :style="{
                 top: b.top + 'px',
@@ -1093,9 +1145,11 @@ const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] afte
                 left: laneLeft(b.id),
                 width: laneWidth(b.id),
                 background: blockBg(b.billable),
-                borderLeft: `2px solid ${blockEdge(b.billable)}`
+                borderLeft: `2px solid ${blockEdge(b.billable)}`,
+                borderTop: b.cutTop ? `1px dashed ${blockEdge(b.billable)}` : undefined,
+                borderBottom: b.cutBottom ? `1px dashed ${blockEdge(b.billable)}` : undefined
               }"
-              @pointerdown="onBlockDown(b.entry, di, $event)"
+              @pointerdown="onBlockDown(b, di, $event)"
               @click="openEntry(b.entry)"
             >
               <!-- Resize zones. They receive the pointer (no pointer-events-none):
@@ -1103,10 +1157,10 @@ const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] afte
                    inert the grab hand won everywhere — the ns-resize arrows were
                    dead CSS. The press still reaches onBlockDown by bubbling,
                    which measures against currentTarget (the block), not target. -->
-              <span class="absolute inset-x-0 top-0 h-[6px] cursor-ns-resize" />
+              <span v-if="!b.cutTop" class="absolute inset-x-0 top-0 h-[6px] cursor-ns-resize" />
               <span class="truncate text-[11px] font-medium leading-[1.25] text-highlighted">{{ b.name }}</span>
               <span class="tnum truncate text-[10px] text-toned">{{ b.sub }}</span>
-              <span class="absolute inset-x-0 bottom-0 h-[6px] cursor-ns-resize" />
+              <span v-if="!b.cutBottom" class="absolute inset-x-0 bottom-0 h-[6px] cursor-ns-resize" />
             </button>
 
             <!-- Start again — the only way a block starts the timer. A sibling
@@ -1128,7 +1182,7 @@ const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] afte
 
             <!-- Touch resize handles (armed block only): 44px hit areas whose
                  dot centers on the block edge; drag starts on contact -->
-            <template v-if="isCoarse && armedId === b.id && !b.dragging">
+            <template v-if="isArmed(b)">
               <span
                 class="absolute z-30 grid size-11 -translate-x-1/2 touch-none place-items-center"
                 :style="{ top: (b.top - 22) + 'px', left: `calc(${laneLeft(b.id)} + ${laneWidth(b.id)} * 0.25)` }"
@@ -1138,6 +1192,7 @@ const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] afte
                 <span class="size-3 rounded-full bg-default ring-2 ring-primary" />
               </span>
               <span
+                v-if="!b.cutBottom"
                 class="absolute z-30 grid size-11 -translate-x-1/2 touch-none place-items-center"
                 :style="{ top: (b.top + b.h - 22) + 'px', left: `calc(${laneLeft(b.id)} + ${laneWidth(b.id)} * 0.75)` }"
                 aria-hidden="true"
@@ -1156,6 +1211,7 @@ const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] afte
             :key="rb.id"
             :title="`${rb.name} · ${rb.sub}`"
             class="pointer-events-none absolute z-[5] flex flex-col gap-px overflow-hidden rounded-sm px-1.5 py-1"
+            :class="[rb.cutTop ? 'rounded-t-none' : '', rb.cutBottom ? 'rounded-b-none' : '']"
             :style="{
               top: rb.top + 'px',
               height: rb.h + 'px',
@@ -1163,6 +1219,8 @@ const PLAY_HIT_22 = "after:absolute after:-inset-y-[6px] after:-left-[22px] afte
               width: laneWidth(rb.id),
               background: blockBg(rb.billable),
               borderLeft: '2px solid var(--ui-primary)',
+              borderTop: rb.cutTop ? '1px dashed var(--ui-primary)' : undefined,
+              borderBottom: rb.cutBottom ? '1px dashed var(--ui-primary)' : undefined,
               boxShadow: '0 0 8px color-mix(in srgb, var(--ui-primary) 45%, transparent)'
             }"
           >
